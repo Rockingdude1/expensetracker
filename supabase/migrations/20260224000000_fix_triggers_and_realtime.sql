@@ -1,14 +1,15 @@
 /*
-  # Fix Database Triggers and Prevent Stale State
+  # Fix Database Triggers, Settlements, and Prevent Stale State
 
   1. Ensure debts table exists with proper schema
-  2. Add INSERT policy for debts table (allows trigger to create debt records)
-  3. Fix after_shared_expense_change trigger for INSERT/UPDATE/soft-DELETE
-  4. Add trigger for updated_at timestamp on transactions
-  5. Add trigger for cascading debt deletion on soft-delete
-  6. Add index on transactions.deleted_at for efficient soft-delete filtering
-  7. Ensure create_user_profile trigger fires correctly for new signups
+  2. Add RLS policies for debts table (allows trigger to create debt records)
+  3. Indexes for debts table and soft-delete filtering
+  4. Updated trigger function handling shared expenses AND settlements
+  5. Trigger for updated_at timestamp on transactions
+  6. Trigger for create_user_profile on new signups
+  7. Fix transaction RLS to allow viewing shared/settlement transactions
   8. Enable Supabase Realtime on key tables
+  9. Backfill existing transactions into debts table
 */
 
 -- ============================================================
@@ -27,7 +28,7 @@ CREATE TABLE IF NOT EXISTS public.debts (
 ALTER TABLE public.debts ENABLE ROW LEVEL SECURITY;
 
 -- ============================================================
--- 2. Add INSERT policy for debts table (missing - needed by trigger)
+-- 2. RLS policies for debts table
 -- ============================================================
 DROP POLICY IF EXISTS "System can insert debts" ON public.debts;
 CREATE POLICY "System can insert debts"
@@ -36,7 +37,6 @@ CREATE POLICY "System can insert debts"
   TO authenticated
   WITH CHECK (true);
 
--- Ensure SELECT policy exists
 DROP POLICY IF EXISTS "Users can view own debts" ON public.debts;
 CREATE POLICY "Users can view own debts"
   ON public.debts
@@ -47,7 +47,6 @@ CREATE POLICY "Users can view own debts"
     debtor_id = (select auth.uid())
   );
 
--- Ensure DELETE policy exists
 DROP POLICY IF EXISTS "Users can delete own debts" ON public.debts;
 CREATE POLICY "Users can delete own debts"
   ON public.debts
@@ -58,7 +57,6 @@ CREATE POLICY "Users can delete own debts"
     debtor_id = (select auth.uid())
   );
 
--- Ensure UPDATE policy exists
 DROP POLICY IF EXISTS "Users can manage own debts" ON public.debts;
 CREATE POLICY "Users can manage own debts"
   ON public.debts
@@ -74,21 +72,26 @@ CREATE POLICY "Users can manage own debts"
   );
 
 -- ============================================================
--- 3. Indexes for debts table
+-- 3. Indexes for debts table and soft-delete filtering
 -- ============================================================
 CREATE INDEX IF NOT EXISTS debts_creditor_id_idx ON public.debts(creditor_id);
 CREATE INDEX IF NOT EXISTS debts_debtor_id_idx ON public.debts(debtor_id);
 CREATE INDEX IF NOT EXISTS debts_transaction_id_idx ON public.debts(transaction_id);
 
--- ============================================================
--- 4. Index on transactions.deleted_at for efficient soft-delete filtering
--- ============================================================
 CREATE INDEX IF NOT EXISTS transactions_deleted_at_idx ON public.transactions(deleted_at)
   WHERE deleted_at IS NULL;
 
 -- ============================================================
--- 5. Updated trigger function for shared expense debt calculation
---    Now handles INSERT, UPDATE, and soft-DELETE (deleted_at set)
+-- 4. Updated trigger function for debt calculation
+--    Handles: shared expenses, settlements, soft-deletes
+--
+--    Settlement logic:
+--    - When user pays friend (type='personal', SETTLEMENT:):
+--      Creates debt: friend owes user (offsets user's existing debt to friend)
+--    - When friend pays user (type='revenue', SETTLEMENT:):
+--      Creates debt: user owes friend (offsets friend's existing debt to user)
+--    - Friend is identified from split_details (new format) or
+--      parsed from description email (old format fallback)
 -- ============================================================
 CREATE OR REPLACE FUNCTION fn_calculate_shared_expense_debts()
 RETURNS TRIGGER AS $$
@@ -102,6 +105,8 @@ DECLARE
   v_debt_amount NUMERIC;
   v_debtor_remaining NUMERIC;
   v_creditor_remaining NUMERIC;
+  v_friend_id UUID;
+  v_friend_email TEXT;
 BEGIN
   -- If the transaction was soft-deleted, remove all associated debts
   IF NEW.deleted_at IS NOT NULL THEN
@@ -109,14 +114,63 @@ BEGIN
     RETURN NEW;
   END IF;
 
-  -- Only process shared transactions with valid data
+  -- ============================================================
+  -- Handle SETTLEMENT transactions
+  -- ============================================================
+  IF NEW.description LIKE 'SETTLEMENT:%' THEN
+    -- Clear any existing debts for this settlement transaction
+    DELETE FROM public.debts WHERE transaction_id = NEW.id;
+
+    v_friend_id := NULL;
+
+    -- New format: get friend from split_details.participants
+    IF NEW.split_details IS NOT NULL
+       AND (NEW.split_details->>'method') = 'settlement'
+       AND jsonb_array_length(COALESCE(NEW.split_details->'participants', '[]'::jsonb)) > 0 THEN
+      v_friend_id := (NEW.split_details->'participants'->0->>'user_id')::UUID;
+    ELSE
+      -- Old format fallback: parse email from description
+      IF NEW.type = 'personal' THEN
+        v_friend_email := TRIM(SUBSTRING(NEW.description FROM 'SETTLEMENT: Paid (.+)$'));
+      ELSE
+        v_friend_email := TRIM(SUBSTRING(NEW.description FROM 'SETTLEMENT: Received from (.+)$'));
+      END IF;
+
+      IF v_friend_email IS NOT NULL AND v_friend_email != '' THEN
+        SELECT id INTO v_friend_id
+        FROM public.user_profiles
+        WHERE email = v_friend_email
+        LIMIT 1;
+      END IF;
+    END IF;
+
+    -- Create the offsetting debt record if we identified the friend
+    IF v_friend_id IS NOT NULL THEN
+      IF NEW.type = 'personal' THEN
+        -- User paid friend -> friend now "owes" user (offsets user's debt to friend)
+        INSERT INTO public.debts (transaction_id, debtor_id, creditor_id, amount)
+        VALUES (NEW.id, v_friend_id, NEW.user_id, NEW.amount);
+      ELSE
+        -- Friend paid user -> user now "owes" friend (offsets friend's debt to user)
+        INSERT INTO public.debts (transaction_id, debtor_id, creditor_id, amount)
+        VALUES (NEW.id, NEW.user_id, v_friend_id, NEW.amount);
+      END IF;
+    END IF;
+
+    RETURN NEW;
+  END IF;
+
+  -- ============================================================
+  -- Skip non-shared, non-settlement transactions
+  -- ============================================================
   IF NEW.type != 'shared' OR NEW.split_details IS NULL OR NEW.payers IS NULL THEN
-    -- For non-shared transactions, clean up any existing debts
     DELETE FROM public.debts WHERE transaction_id = NEW.id;
     RETURN NEW;
   END IF;
 
-  -- Clear existing debts for this transaction
+  -- ============================================================
+  -- Handle shared transactions: calculate debts from payers/participants
+  -- ============================================================
   DELETE FROM public.debts WHERE transaction_id = NEW.id;
 
   -- Use a temporary table to accumulate net balances
@@ -182,7 +236,7 @@ END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
 -- ============================================================
--- 6. Recreate the trigger for shared expense changes
+-- 5. Recreate the trigger for transaction changes
 -- ============================================================
 DROP TRIGGER IF EXISTS after_shared_expense_change ON public.transactions;
 
@@ -192,7 +246,7 @@ CREATE TRIGGER after_shared_expense_change
   EXECUTE FUNCTION fn_calculate_shared_expense_debts();
 
 -- ============================================================
--- 7. Ensure updated_at trigger exists on transactions
+-- 6. Ensure updated_at trigger exists on transactions
 -- ============================================================
 CREATE OR REPLACE FUNCTION public.update_updated_at_column()
 RETURNS TRIGGER AS $$
@@ -210,7 +264,7 @@ CREATE TRIGGER update_transactions_updated_at
   EXECUTE FUNCTION public.update_updated_at_column();
 
 -- ============================================================
--- 8. Ensure create_user_profile trigger exists
+-- 7. Ensure create_user_profile trigger exists
 -- ============================================================
 CREATE OR REPLACE FUNCTION create_user_profile()
 RETURNS TRIGGER AS $$
@@ -234,8 +288,37 @@ CREATE TRIGGER create_user_profile_trigger
   EXECUTE FUNCTION create_user_profile();
 
 -- ============================================================
+-- 8. Fix transaction RLS: allow users to view transactions
+--    they are involved in (as creator, payer, or participant)
+--    This is needed so settlement counterparties and shared
+--    expense participants can see relevant transactions.
+-- ============================================================
+DROP POLICY IF EXISTS "Users can view transactions they are involved in" ON public.transactions;
+CREATE POLICY "Users can view transactions they are involved in"
+  ON public.transactions
+  FOR SELECT
+  TO authenticated
+  USING (
+    user_id = (select auth.uid())
+    OR payers @> ('[{"user_id": "' || (select auth.uid())::text || '"}]')::jsonb
+    OR split_details -> 'participants' @> ('[{"user_id": "' || (select auth.uid())::text || '"}]')::jsonb
+  );
+
+-- ============================================================
 -- 9. Enable Supabase Realtime on key tables
 -- ============================================================
 ALTER PUBLICATION supabase_realtime ADD TABLE public.transactions;
 ALTER PUBLICATION supabase_realtime ADD TABLE public.debts;
 ALTER PUBLICATION supabase_realtime ADD TABLE public.user_profiles;
+
+-- ============================================================
+-- 10. Backfill: Process existing transactions to populate debts
+--     This UPDATE triggers the AFTER UPDATE trigger which calls
+--     fn_calculate_shared_expense_debts() for each relevant row,
+--     populating the debts table with records for both shared
+--     expenses and settlements.
+-- ============================================================
+UPDATE public.transactions
+SET updated_at = now()
+WHERE deleted_at IS NULL
+  AND (type = 'shared' OR description LIKE 'SETTLEMENT:%');

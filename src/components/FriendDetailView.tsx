@@ -46,12 +46,16 @@ const FriendDetailView: React.FC<FriendDetailViewProps> = ({ friendId, onBack, o
       const friendTransactions = allTransactions?.filter(tx => {
         if (tx.deleted_at) return false;
 
-        if (tx.description?.startsWith('SETTLEMENT:') && tx.description?.includes(friendProfile.email)) {
-          return true;
+        // Settlement transactions: check description (old format) and split_details (new format)
+        if (tx.description?.startsWith('SETTLEMENT:')) {
+          const matchesByEmail = tx.description?.includes(friendProfile.email);
+          const matchesByParticipant = tx.split_details?.participants?.some(p => p.user_id === friendId);
+          if (matchesByEmail || matchesByParticipant) return true;
         }
 
+        // Shared expenses where both users are involved
         if (tx.type === 'shared') {
-          const participantIds = tx.split_details?.participants.map(p => p.user_id) || [];
+          const participantIds = tx.split_details?.participants?.map(p => p.user_id) || [];
           const payerIds = tx.payers?.map(p => p.user_id) || [];
           const bothAreParticipants = participantIds.includes(currentUser.id) && participantIds.includes(friendId);
           const eitherPaid = payerIds.includes(currentUser.id) || payerIds.includes(friendId);
@@ -107,7 +111,14 @@ const FriendDetailView: React.FC<FriendDetailViewProps> = ({ friendId, onBack, o
 
     // Settlement transactions
     if (transaction.description?.startsWith('SETTLEMENT:')) {
-      if (transaction.description.includes(`Paid ${friend.email}`)) {
+      const isUserPaid = transaction.type === 'personal'
+        && (transaction.description.includes(`Paid ${friend.email}`)
+            || transaction.split_details?.participants?.some(p => p.user_id === friend.id));
+      const isFriendPaid = transaction.type === 'revenue'
+        && (transaction.description.includes(`Received from ${friend.email}`)
+            || transaction.split_details?.participants?.some(p => p.user_id === friend.id));
+
+      if (isUserPaid) {
         return {
           description: 'Settlement Payment',
           amount: transaction.amount,
@@ -115,7 +126,7 @@ const FriendDetailView: React.FC<FriendDetailViewProps> = ({ friendId, onBack, o
           subtext: `You paid ${friend.display_name || friend.email.split('@')[0]}`,
           icon: <DollarSign className="h-5 w-5 text-emerald-600" />,
         };
-      } else if (transaction.description.includes(`Received from ${friend.email}`)) {
+      } else if (isFriendPaid) {
         return {
           description: 'Settlement Received',
           amount: transaction.amount,

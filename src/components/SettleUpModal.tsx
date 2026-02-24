@@ -90,30 +90,28 @@ const SettleUpModal: React.FC<SettleUpModalProps> = ({
 
 
 
-      // Create settlement transaction
-
+      // Create settlement transaction with split_details containing friend info
+      // so the DB trigger can identify the counterparty and create offset debt records
       const settlementTransaction = {
-
         type: youOwe ? 'personal' as const : 'revenue' as const,
-
         amount: settlementAmount,
-
         payment_mode: paymentMode,
-
-        description: youOwe 
-
-          ? `SETTLEMENT: Paid ${friend.email}` 
-
+        description: youOwe
+          ? `SETTLEMENT: Paid ${friend.email}`
           : `SETTLEMENT: Received from ${friend.email}`,
-
         date: new Date().toISOString(),
-
         category: undefined,
         payers: [{
-      user_id: youOwe ? user.id : friend.id,
-      amount_paid: settlementAmount
-  }]
-
+          user_id: youOwe ? user.id : friend.id,
+          amount_paid: settlementAmount
+        }],
+        split_details: {
+          method: 'settlement' as const,
+          participants: [{
+            user_id: friend.id,
+            share_amount: settlementAmount
+          }]
+        }
       };
 
 

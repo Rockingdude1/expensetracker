@@ -32,7 +32,7 @@ export interface SplitParticipant {
 
 // Defines the entire split details object
 export interface SplitDetails {
-  method: 'equally' | 'percentages';
+  method: 'equally' | 'percentages' | 'settlement';
   participants: SplitParticipant[];
 }
 
