@@ -1,118 +1,59 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Plus, TrendingUp, TrendingDown, CreditCard, Banknote, Users, Calendar, ChevronDown, Moon, Sun, LogOut, User } from 'lucide-react';
 import Dashboard from './components/Dashboard';
 import AddTransaction from './components/AddTransaction';
 import TransactionHistory from './components/TransactionHistory';
 import FriendsList from './components/FriendsList';
 import AuthGuard from './components/AuthGuard';
-import { Transaction, TransactionType, PaymentMode, Period } from './types';
+import { Transaction, TransactionType, PaymentMode, UserProfile } from './types';
 import { useTheme } from './contexts/ThemeContext';
 import { useAuth } from './contexts/AuthContext';
+import { useTransactionSync } from './contexts/TransactionSyncContext';
 import { transactionService } from './services/transactionService';
-import { userService } from './services/userService';
 import { formatMonthYear, getCurrentMonthYear, getMonthYearFromDate } from './utils/dateUtils';
 
 function App() {
   const { theme, toggleTheme } = useTheme();
   const { user, signOut } = useAuth();
-  const [transactions, setTransactions] = useState<Transaction[]>([]);
-  const [profilesMap, setProfilesMap] = useState<Map<string, UserProfile>>(new Map());
-  const [friendBalances, setFriendBalances] = useState<Map<string, number>>(new Map());
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const {
+    transactions,
+    profilesMap,
+    friendBalances,
+    loading,
+    error,
+    setError,
+    refreshAll,
+    refreshBalances,
+    addTransactionOptimistic,
+    updateTransactionOptimistic,
+    removeTransactionOptimistic,
+  } = useTransactionSync();
+
   const [currentView, setCurrentView] = useState<'dashboard' | 'add' | 'history' | 'friends'>('dashboard');
   const [selectedMonthYear, setSelectedMonthYear] = useState<string>(getCurrentMonthYear());
   const [availableMonths, setAvailableMonths] = useState<string[]>([getCurrentMonthYear()]);
   const [showMonthDropdown, setShowMonthDropdown] = useState(false);
   const [showUserMenu, setShowUserMenu] = useState(false);
-
-  // Load transactions from Supabase when user changes
-  useEffect(() => {
-    const loadTransactions = async () => {
-      if (!user) {
-        setTransactions([]);
-        setProfilesMap(new Map());
-        return;
-      }
-
-      setLoading(true);
-      setError(null);
-      
-      try {
-        console.log('Loading transactions for user:', user.id);
-        
-        // First, try to migrate any existing localStorage data
-        await transactionService.migrateLocalStorageData(user.id);
-        
-        // Then fetch all transactions from Supabase
-       const fetchedTransactions = await transactionService.fetchTransactions(user.id);
-        console.log('Fetched transactions from Supabase:', fetchedTransactions.length);
-        setTransactions(fetchedTransactions);
-        
-        // Fetch friend balances from debts table
-        const balances = await transactionService.getFriendBalances(user.id);
-        setFriendBalances(balances);
-
-        // Calculate and store monthly balances for the balance carried forward feature
-        await transactionService.calculateAndStoreMonthlyBalances(user.id, fetchedTransactions);
-
-        // Collect all unique user IDs from transactions
-        const userIds = new Set<string>();
-        fetchedTransactions.forEach(transaction => {
-          userIds.add(transaction.user_id);
-          if (transaction.payers) {
-            transaction.payers.forEach(payer => userIds.add(payer.user_id));
-          }
-          if (transaction.split_details?.participants) {
-            transaction.split_details.participants.forEach(participant => userIds.add(participant.user_id));
-          }
-        });
-
-        // Fetch user profiles for all involved users
-        if (userIds.size > 0) {
-          const profiles = await userService.getUsersByIds(Array.from(userIds));
-          const newProfilesMap = new Map<string, UserProfile>();
-          profiles.forEach(profile => {
-            newProfilesMap.set(profile.id, profile);
-          });
-          setProfilesMap(newProfilesMap);
-        }
-        
-        // Clear any localStorage data after successful sync
-        localStorage.removeItem(`expense-tracker-data-${user.id}`);
-      } catch (err) {
-        console.error('Error loading transactions:', err);
-        setError('Failed to load transactions from cloud storage. Please check your internet connection and try refreshing.');
-        
-        // Don't fallback to localStorage anymore - we want to force cloud sync
-        setTransactions([]);
-        setProfilesMap(new Map());
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    loadTransactions();
-  }, [user?.id]);
+  const [actionLoading, setActionLoading] = useState(false);
 
   // Update available months when transactions change
   useEffect(() => {
     const currentMonth = getCurrentMonthYear();
     const monthsWithTransactions = new Set<string>();
-    
+
     // Always include current month
     monthsWithTransactions.add(currentMonth);
-    
+
     // Add months that have transactions
     transactions.forEach(transaction => {
       const monthYear = getMonthYearFromDate(transaction.date);
       monthsWithTransactions.add(monthYear);
     });
-    
+
     // Convert to sorted array (newest first)
     const sortedMonths = Array.from(monthsWithTransactions).sort((a, b) => b.localeCompare(a));
     setAvailableMonths(sortedMonths);
-    
+
     // If selected month is no longer available, default to current month
     if (!sortedMonths.includes(selectedMonthYear)) {
       setSelectedMonthYear(currentMonth);
@@ -122,80 +63,80 @@ function App() {
   const addTransaction = async (transaction: Omit<Transaction, 'id' | 'date'>) => {
     if (!user) return;
 
-    setLoading(true);
+    setActionLoading(true);
     setError(null);
 
     try {
-      console.log('Adding transaction for user:', user.id);
       const transactionWithDate = {
         ...transaction,
         date: new Date().toISOString(),
       };
 
       const newTransaction = await transactionService.addTransaction(transactionWithDate, user);
-      console.log('Transaction added successfully:', newTransaction.id);
-      const updatedTransactions = [newTransaction, ...transactions];
-      setTransactions(updatedTransactions);
+      // Optimistically add to local state; real-time will confirm
+      addTransactionOptimistic(newTransaction);
 
-      await transactionService.calculateAndStoreMonthlyBalances(user.id, updatedTransactions);
+      // Refresh balances since debt trigger may have fired
+      await refreshBalances();
+      await transactionService.calculateAndStoreMonthlyBalances(user.id, [newTransaction, ...transactions]);
 
       setCurrentView('dashboard');
     } catch (err) {
       console.error('Error adding transaction:', err);
-      setError('Failed to add transaction to cloud storage. Please check your internet connection and try again.');
+      setError('Failed to add transaction. Please check your internet connection and try again.');
+      // Real-time will re-sync on next event
     } finally {
-      setLoading(false);
+      setActionLoading(false);
     }
   };
 
-// In your App.js file
-
   const deleteTransaction = async (id: string) => {
-    // The if (!user) check is still good practice.
     if (!user) return;
 
     try {
-      console.log('Soft-deleting transaction:', id);
-      
-      // --- THIS IS THE CHANGE ---
-      // We no longer pass the 'user' object. The service will handle it.
-      const updatedTransactionWithDeletion = await transactionService.deleteTransaction(id);
-      // --- END OF CHANGE ---
+      // Optimistically mark as deleted
+      removeTransactionOptimistic(id);
 
-      console.log('Transaction soft-deleted successfully');
+      const updatedTransaction = await transactionService.deleteTransaction(id);
+      updateTransactionOptimistic(id, updatedTransaction);
 
-      const updatedTransactions = transactions.map(t => t.id === id ? updatedTransactionWithDeletion : t);
-      setTransactions(updatedTransactions);
+      // Refresh balances since debt trigger cleans up debts on soft-delete
+      await refreshBalances();
 
+      const updatedTransactions = transactions.map(t => t.id === id ? updatedTransaction : t);
       await transactionService.calculateAndStoreMonthlyBalances(user.id, updatedTransactions);
-      
     } catch (err) {
       console.error('Error deleting transaction:', err);
       setError('Failed to delete transaction. Please try again.');
+      // Refetch to recover from failed optimistic update
+      await refreshAll();
     }
   };
 
   const updateTransaction = async (id: string, updates: Partial<Transaction>) => {
     if (!user) return;
 
-    setLoading(true);
+    setActionLoading(true);
     setError(null);
 
     try {
-      console.log('Updating transaction:', id);
       const updatedTransaction = await transactionService.updateTransaction(id, updates, user);
-      console.log('Transaction updated successfully');
-      const updatedTransactions = transactions.map(t => t.id === id ? updatedTransaction : t);
-      setTransactions(updatedTransactions);
+      updateTransactionOptimistic(id, updatedTransaction);
 
+      // Refresh balances since debt trigger may have recalculated
+      await refreshBalances();
+
+      const updatedTransactions = transactions.map(t => t.id === id ? updatedTransaction : t);
       await transactionService.calculateAndStoreMonthlyBalances(user.id, updatedTransactions);
     } catch (err) {
       console.error('Error updating transaction:', err);
-      setError('Failed to update transaction in cloud storage. Please check your internet connection and try again.');
+      setError('Failed to update transaction. Please check your internet connection and try again.');
+      await refreshAll();
     } finally {
-      setLoading(false);
+      setActionLoading(false);
     }
   };
+
   const getFilteredTransactions = () => {
     return transactions.filter(transaction => {
       const transactionMonthYear = getMonthYearFromDate(transaction.date);
@@ -207,11 +148,12 @@ function App() {
 
   const handleSignOut = async () => {
     await signOut();
-    setTransactions([]);
     setError(null);
     setCurrentView('dashboard');
     setShowUserMenu(false);
   };
+
+  const isLoading = loading || actionLoading;
 
   return (
     <AuthGuard>
@@ -243,7 +185,7 @@ function App() {
                 </div>
                 <h1 className="text-xl sm:text-2xl font-bold text-slate-900 dark:text-white">Spendify</h1>
               </div>
-              
+
               {/* Theme Toggle, Period Selector, and User Menu */}
               <div className="flex items-center space-x-2 sm:space-x-4">
                 <button
@@ -256,7 +198,7 @@ function App() {
                     <Sun className="h-5 w-5 text-slate-600 dark:text-slate-300" />
                   )}
                 </button>
-                
+
                 <div className="relative">
                   <button
                     onClick={() => setShowMonthDropdown(!showMonthDropdown)}
@@ -271,7 +213,7 @@ function App() {
                     </span>
                     <ChevronDown className="h-4 w-4 text-slate-500 dark:text-slate-400" />
                   </button>
-                  
+
                   {showMonthDropdown && (
                     <div className="absolute right-0 top-full mt-2 bg-white dark:bg-slate-800 rounded-lg shadow-lg border border-slate-200 dark:border-slate-700 py-2 min-w-48 max-h-64 overflow-y-auto z-10">
                       {availableMonths.map((monthYear) => (
@@ -305,7 +247,7 @@ function App() {
                       {user?.email}
                     </span>
                   </button>
-                  
+
                   {showUserMenu && (
                     <div className="absolute right-0 top-full mt-2 bg-white dark:bg-slate-800 rounded-lg shadow-lg border border-slate-200 dark:border-slate-700 py-2 min-w-48 z-10">
                       <div className="px-4 py-2 border-b border-slate-200 dark:border-slate-700">
@@ -382,7 +324,7 @@ function App() {
         {/* Main Content */}
         <main className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8 relative">
           {/* Loading Overlay */}
-          {loading && (
+          {isLoading && (
             <div className="absolute inset-0 bg-white/50 dark:bg-slate-900/50 backdrop-blur-sm z-10 flex items-center justify-center">
               <div className="bg-white dark:bg-slate-800 rounded-lg shadow-lg p-6 flex items-center space-x-3">
                 <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-emerald-500"></div>
@@ -392,15 +334,15 @@ function App() {
           )}
 
           {currentView === 'dashboard' && (
-            <Dashboard 
-              transactions={filteredTransactions} 
+            <Dashboard
+              transactions={filteredTransactions}
               period={selectedMonthYear}
               friendBalances={friendBalances}
               onAddTransaction={() => setCurrentView('add')}
             />
           )}
           {currentView === 'add' && (
-            <AddTransaction 
+            <AddTransaction
               onSubmit={addTransaction}
               onCancel={() => setCurrentView('dashboard')}
             />
@@ -409,7 +351,7 @@ function App() {
             <FriendsList />
           )}
           {currentView === 'history' && (
-            <TransactionHistory 
+            <TransactionHistory
               transactions={filteredTransactions}
               period={selectedMonthYear}
               profilesMap={profilesMap}
@@ -431,8 +373,8 @@ function App() {
 
         {/* Click outside handlers */}
         {(showMonthDropdown || showUserMenu) && (
-          <div 
-            className="fixed inset-0 z-0" 
+          <div
+            className="fixed inset-0 z-0"
             onClick={() => {
               setShowMonthDropdown(false);
               setShowUserMenu(false);

@@ -1,13 +1,13 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Search, UserPlus, Users, Settings, ChevronRight, ArrowLeft, Check, X as XIcon } from 'lucide-react';
-import { useAuth } from '../contexts/AuthContext'; // CORRECT: Get user from the Auth Context
-import { transactionService } from '../services/transactionService';
-import { userService, UserProfile } from '../services/userService';
+import { useAuth } from '../contexts/AuthContext';
+import { useTransactionSync } from '../contexts/TransactionSyncContext';
+import { userService } from '../services/userService';
+import { UserProfile } from '../types';
 import AddFriendModal from './AddFriendModal';
 import FriendDetailView from './FriendDetailView';
 import FriendRequestsModal from './FriendRequestsModal';
 
-// This interface is simple and matches the data we will create
 interface FriendBalance {
   friend_id: string;
   friend_name: string;
@@ -16,7 +16,8 @@ interface FriendBalance {
 }
 
 const FriendsList: React.FC = () => {
-  const { user: currentUser } = useAuth(); // CORRECT: This is your app's way of getting the user
+  const { user: currentUser } = useAuth();
+  const { refreshBalances } = useTransactionSync();
   const [searchQuery, setSearchQuery] = useState('');
   const [showSettledFriends, setShowSettledFriends] = useState(false);
   const [showAddFriendModal, setShowAddFriendModal] = useState(false);
@@ -27,53 +28,30 @@ const FriendsList: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // CORRECT: This useEffect now correctly depends on currentUser from the useAuth hook.
-  // It will run once the user is logged in and available.
   useEffect(() => {
     if (currentUser) {
-      loadFriendBalances(currentUser.id);
+      loadFriendBalances();
       loadPendingRequests();
     } else {
-      setLoading(false); // If there's no user, we're not loading anything.
+      setLoading(false);
     }
-  }, [currentUser]); // The dependency array ensures this runs when the user logs in.
+  }, [currentUser]);
 
-  // This is our new, efficient function that reads from the 'debts' table.
- // In FriendsList.tsx, replace the old loadFriendBalances function with this one.
-
-const loadFriendBalances = async (userId: string) => {
+  const loadFriendBalances = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
-      
-      // 1. Call the single, correct service function.
-      const balances = await userService.getFriendBalances(); 
-      const friends = await userService.getFriends();
 
-      // 2. The new service already returns almost everything we need.
-      // We just need to add any friends who might have a zero balance.
-      const balancesMap = new Map(balances.map(b => [b.friend_id, b]));
-
-      friends.forEach(friend => {
-        if (!balancesMap.has(friend.id)) {
-          balances.push({
-            friend_id: friend.id,
-            friend_name: friend.display_name || (friend.email ? friend.email.split('@')[0] : 'Unknown'),
-            friend_email: friend.email || '',
-            balance: 0,
-          });
-        }
-      });
-
+      // Reads directly from the debts table via the simplified service
+      const balances = await userService.getFriendBalances();
       setFriendBalances(balances);
-
     } catch (err) {
       console.error('Error loading friend balances:', err);
       setError('Failed to load friend balances');
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   const loadPendingRequests = async () => {
     try {
@@ -83,13 +61,13 @@ const loadFriendBalances = async (userId: string) => {
       console.error('Error loading pending requests:', err);
     }
   };
-  
-  const refreshData = () => {
-    if (currentUser) {
-      loadFriendBalances(currentUser.id);
-      loadPendingRequests();
-    }
-  };
+
+  const refreshData = useCallback(() => {
+    loadFriendBalances();
+    loadPendingRequests();
+    // Also refresh the global sync context balances
+    refreshBalances();
+  }, [loadFriendBalances, refreshBalances]);
 
   const handleAcceptRequest = async (connectionId: string) => {
     try {
@@ -108,15 +86,12 @@ const loadFriendBalances = async (userId: string) => {
       setError('Failed to reject friend request');
     }
   };
-  
-  // The rest of your component's JSX and logic is preserved.
-  // No changes are needed below this line.
-  
+
   const activeFriends = friendBalances.filter(friend => Math.abs(friend.balance) > 0.01);
   const settledFriends = friendBalances.filter(friend => Math.abs(friend.balance) <= 0.01);
   const totalBalance = friendBalances.reduce((sum, friend) => sum + friend.balance, 0);
 
-  const filteredFriends = activeFriends.filter(friend => 
+  const filteredFriends = activeFriends.filter(friend =>
     friend.friend_name.toLowerCase().includes(searchQuery.toLowerCase()) ||
     friend.friend_email.toLowerCase().includes(searchQuery.toLowerCase())
   );
@@ -139,7 +114,7 @@ const loadFriendBalances = async (userId: string) => {
       <FriendDetailView
         friendId={selectedFriendId}
         onBack={() => setSelectedFriendId(null)}
-        onBalanceUpdated={() => currentUser && loadFriendBalances(currentUser.id)}
+        onBalanceUpdated={refreshData}
       />
     );
   }
@@ -172,7 +147,7 @@ const loadFriendBalances = async (userId: string) => {
       {error && <div className="text-red-500 p-4 bg-red-50 rounded-lg">{error}</div>}
       <div className="bg-white dark:bg-slate-800 rounded-xl shadow-sm border">
         <div className="divide-y">
-            {filteredFriends.length === 0 
+            {filteredFriends.length === 0
              ? <div className="p-8 text-center"><Users className="h-12 w-12 mx-auto text-slate-400 mb-4" /><h3 className="font-semibold">No friends with active balances</h3></div>
              : filteredFriends.map((friend) => (
                 <div key={friend.friend_id} className="p-4 sm:p-6 hover:bg-slate-50 cursor-pointer" onClick={() => setSelectedFriendId(friend.friend_id)}>

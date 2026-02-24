@@ -1,5 +1,8 @@
 import { supabase } from '../lib/supabase';
-import { Transaction, UserProfile, UserConnection, FriendBalance } from '../types';
+import { UserProfile, UserConnection, FriendBalance } from '../types';
+
+// Re-export types for backward compatibility
+export type { UserProfile, UserConnection, FriendBalance };
 
 export const userService = {
 
@@ -183,98 +186,76 @@ export const userService = {
     }
   },
   
-  // UPDATED: The final, smarter balance calculation
-async getFriendBalances(): Promise<FriendBalance[]> {
-  try {
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return [];
-    
-    // Fetch all transactions that haven't been soft-deleted
-    const { data: transactionsData, error: transactionsError } = await supabase
-      .from('transactions')
-      .select('*')
-      .is('deleted_at', null);
-      
-    if (transactionsError) {
-      console.error('Error fetching transactions for balance:', transactionsError);
+  // Simplified: Query the debts table directly instead of recalculating in JavaScript
+  async getFriendBalances(): Promise<FriendBalance[]> {
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return [];
+
+      // Get all debts where current user is involved
+      const { data: debts, error: debtsError } = await supabase
+        .from('debts')
+        .select('debtor_id, creditor_id, amount')
+        .or(`debtor_id.eq.${user.id},creditor_id.eq.${user.id}`);
+
+      if (debtsError) {
+        console.error('Error fetching debts for balance:', debtsError);
+        return [];
+      }
+
+      // Build a map of friend_id -> net balance
+      const balanceMap = new Map<string, number>();
+
+      for (const debt of (debts || [])) {
+        if (debt.debtor_id === user.id) {
+          // I am the debtor -> I owe this creditor (negative balance for me)
+          const friendId = debt.creditor_id;
+          const current = balanceMap.get(friendId) || 0;
+          balanceMap.set(friendId, current - parseFloat(debt.amount));
+        } else {
+          // I am the creditor -> this debtor owes me (positive balance for me)
+          const friendId = debt.debtor_id;
+          const current = balanceMap.get(friendId) || 0;
+          balanceMap.set(friendId, current + parseFloat(debt.amount));
+        }
+      }
+
+      // Get friend profiles
+      const friends = await this.getFriends();
+      const friendProfileMap = new Map(friends.map(f => [f.id, f]));
+
+      // Build FriendBalance array
+      const friendBalances: FriendBalance[] = [];
+
+      // Add friends with non-zero balances from debts
+      for (const [friendId, balance] of balanceMap.entries()) {
+        const profile = friendProfileMap.get(friendId);
+        friendBalances.push({
+          friend_id: friendId,
+          friend_name: profile?.display_name || profile?.email?.split('@')[0] || 'Unknown User',
+          friend_email: profile?.email || '',
+          balance: Math.round(balance * 100) / 100,
+          details: [],
+        });
+      }
+
+      // Add friends who have zero balance (not in debts table)
+      for (const friend of friends) {
+        if (!balanceMap.has(friend.id)) {
+          friendBalances.push({
+            friend_id: friend.id,
+            friend_name: friend.display_name || friend.email?.split('@')[0] || 'Unknown User',
+            friend_email: friend.email || '',
+            balance: 0,
+            details: [],
+          });
+        }
+      }
+
+      return friendBalances;
+    } catch (error) {
+      console.error('Error in getFriendBalances:', error);
       return [];
     }
-    
-    const transactions = (transactionsData || []) as Transaction[];
-    const friends = await this.getFriends();
-    if (friends.length === 0) return [];
-
-    // Calculate true pairwise balances between me and each friend
-    const friendBalances: FriendBalance[] = friends.map(friend => {
-      let netBalance = 0; // Positive means friend owes me, negative means I owe friend
-
-      transactions.forEach(tx => {
-        // --- 1. Handle Settlement Transactions ---
-        if (tx.description?.startsWith('SETTLEMENT:')) {
-          if (tx.description.includes(friend.email)) {
-            // I paid this friend (settlement) -> reduces what I owe them OR increases what they owe me
-            if (tx.description.includes(`Paid ${friend.email}`)) {
-              netBalance += tx.amount;
-            } 
-            // This friend paid me (settlement) -> reduces what they owe me OR increases what I owe them
-            else if (tx.description.includes(`Received from ${friend.email}`)) {
-              netBalance -= tx.amount;
-            }
-          }
-          return; // Skip to next transaction
-        }
-
-        // --- 2. Handle Shared Expense Transactions ---
-        if (tx.type === 'shared' && tx.split_details && tx.payers) {
-          const participants = tx.split_details.participants;
-          const participantIds = participants.map(p => p.user_id);
-          
-          // Only process if both me and this friend are participants in the transaction
-          if (participantIds.includes(user.id) && participantIds.includes(friend.id)) {
-            
-            // A. Find what each person was supposed to pay (their share)
-            const myShare = participants.find(p => p.user_id === user.id)?.share_amount || 0;
-            const friendShare = participants.find(p => p.user_id === friend.id)?.share_amount || 0;
-
-            // B. Find what each person actually paid
-            const myPayment = tx.payers.find(p => p.user_id === user.id)?.amount_paid || 0;
-            const friendPayment = tx.payers.find(p => p.user_id === friend.id)?.amount_paid || 0;
-            
-            // C. Calculate each person's balance FOR THIS TRANSACTION
-            // Negative means they overpaid (are owed), positive means they underpaid (they owe)
-            const myBalanceForTx = myShare - myPayment; 
-            const friendBalanceForTx = friendShare - friendPayment;
-
-            // D. Determine the flow of money between US and update the netBalance
-            // CASE 1: I overpaid and my friend underpaid -> Friend now owes me more
-            if (myBalanceForTx < 0 && friendBalanceForTx > 0) {
-              const amountFriendOwesMe = Math.min(Math.abs(myBalanceForTx), friendBalanceForTx);
-              netBalance += amountFriendOwesMe;
-            } 
-            // CASE 2: I underpaid and my friend overpaid -> I now owe my friend more
-            else if (myBalanceForTx > 0 && friendBalanceForTx < 0) {
-              const amountIOweFriend = Math.min(myBalanceForTx, Math.abs(friendBalanceForTx));
-              netBalance -= amountIOweFriend;
-            }
-            // In all other cases (e.g., someone else paid for both of us), no debt is created between us.
-          }
-        }
-      });
-
-      return {
-        friend_id: friend.id,
-        friend_name: friend.display_name || friend.email?.split('@')[0] || 'Unknown User',
-        friend_email: friend.email,
-        balance: Math.round(netBalance * 100) / 100, // Round to 2 decimal places
-        details: [] // Details array is not needed for the summary balance
-      };
-    });
-
-    return friendBalances;
-
-  } catch (error) {
-    console.error('Error in getFriendBalances:', error);
-    return [];
   }
-}
 };

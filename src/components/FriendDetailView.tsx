@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { ArrowLeft, Calendar, CreditCard, Banknote, Users, DollarSign } from 'lucide-react';
-import { userService, UserProfile, FriendBalance } from '../services/userService';
-import { Transaction } from '../types';
+import { userService } from '../services/userService';
+import { Transaction, UserProfile, FriendBalance } from '../types';
 import SettleUpModal from './SettleUpModal';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../contexts/AuthContext';
@@ -26,77 +26,69 @@ const FriendDetailView: React.FC<FriendDetailViewProps> = ({ friendId, onBack, o
     loadFriendData();
   }, [friendId, currentUser]);
 
-  // Replace the entire old function with this one
-const loadFriendData = async () => {
-  try {
-    if (!currentUser) return;
-    setLoading(true);
-    setError(null);
+  const loadFriendData = async () => {
+    try {
+      if (!currentUser) return;
+      setLoading(true);
+      setError(null);
 
-    const { data: friendProfile, error: friendError } = await supabase
-      .from('user_profiles').select('*').eq('id', friendId).single();
+      const { data: friendProfile, error: friendError } = await supabase
+        .from('user_profiles').select('*').eq('id', friendId).single();
 
-    if (friendError || !friendProfile) throw new Error("Friend profile not found.");
-    setFriend(friendProfile);
+      if (friendError || !friendProfile) throw new Error("Friend profile not found.");
+      setFriend(friendProfile);
 
-    const { data: allTransactions, error: transactionError } = await supabase
-      .from('transactions').select('*'); 
+      const { data: allTransactions, error: transactionError } = await supabase
+        .from('transactions').select('*');
 
-    if (transactionError) throw new Error("Could not fetch transaction history.");
+      if (transactionError) throw new Error("Could not fetch transaction history.");
 
-    const friendTransactions = allTransactions?.filter(tx => {
-      if (tx.deleted_at) return false;
+      const friendTransactions = allTransactions?.filter(tx => {
+        if (tx.deleted_at) return false;
 
-      if (tx.description?.startsWith('SETTLEMENT:') && tx.description?.includes(friendProfile.email)) {
-        return true;
-      }
+        if (tx.description?.startsWith('SETTLEMENT:') && tx.description?.includes(friendProfile.email)) {
+          return true;
+        }
 
-      if (tx.type === 'shared') {
-        const participantIds = tx.split_details?.participants.map(p => p.user_id) || [];
-        const payerIds = tx.payers?.map(p => p.user_id) || [];
+        if (tx.type === 'shared') {
+          const participantIds = tx.split_details?.participants.map(p => p.user_id) || [];
+          const payerIds = tx.payers?.map(p => p.user_id) || [];
+          const bothAreParticipants = participantIds.includes(currentUser.id) && participantIds.includes(friendId);
+          const eitherPaid = payerIds.includes(currentUser.id) || payerIds.includes(friendId);
+          return bothAreParticipants && eitherPaid;
+        }
 
-        // Both must be participants
-        const bothAreParticipants = participantIds.includes(currentUser.id) && participantIds.includes(friendId);
+        return false;
+      }) || [];
 
-        // At least one of them must have paid (to create debt between them)
-        const eitherPaid = payerIds.includes(currentUser.id) || payerIds.includes(friendId);
+      friendTransactions.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+      setTransactions(friendTransactions);
 
-        // Only show if both are participants AND at least one of them paid
-        return bothAreParticipants && eitherPaid;
-      }
+      // Build profilesMap
+      const userIds = new Set<string>();
+      friendTransactions.forEach(tx => {
+        tx.payers?.forEach(p => userIds.add(p.user_id));
+        tx.split_details?.participants?.forEach(p => userIds.add(p.user_id));
+      });
+      userIds.add(currentUser.id);
+      userIds.add(friendId);
 
-      return false;
-    }) || [];
+      const profiles = await userService.getUsersByIds(Array.from(userIds));
+      const newProfilesMap = new Map<string, UserProfile>();
+      profiles.forEach(p => newProfilesMap.set(p.id, p));
+      setProfilesMap(newProfilesMap);
 
-    friendTransactions.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-    setTransactions(friendTransactions);
+      // Get balance from debts table
+      const balances = await userService.getFriendBalances();
+      const currentFriendBalance = balances.find(b => b.friend_id === friendId);
+      setFriendBalance(currentFriendBalance || null);
 
-    // --- NEW LOGIC TO CREATE profilesMap ---
-    const userIds = new Set<string>();
-    friendTransactions.forEach(tx => {
-        tx.payers.forEach(p => userIds.add(p.user_id));
-        tx.split_details?.participants.forEach(p => userIds.add(p.user_id));
-    });
-    userIds.add(currentUser.id);
-    userIds.add(friendId);
-
-    // This fetches all necessary user profiles in one efficient call
-    const profiles = await userService.getUsersByIds(Array.from(userIds));
-    const newProfilesMap = new Map<string, UserProfile>();
-    profiles.forEach(p => newProfilesMap.set(p.id, p));
-    setProfilesMap(newProfilesMap); // Set the new state variable
-    // --- END OF NEW LOGIC ---
-
-    const balances = await userService.getFriendBalances();
-    const currentFriendBalance = balances.find(b => b.friend_id === friendId);
-    setFriendBalance(currentFriendBalance || null);
-
-  } catch (err: any) {
-    setError(err.message || 'Failed to load friend data');
-  } finally {
-    setLoading(false);
-  }
-};
+    } catch (err: any) {
+      setError(err.message || 'Failed to load friend data');
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const formatCurrency = (amount: number) => {
     return new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR' }).format(amount);
@@ -110,82 +102,81 @@ const loadFriendData = async () => {
     });
   };
 
-// DELETE the old getTransactionInfo function and REPLACE it with this one
-const getTransactionInfo = (transaction: Transaction) => {
-  if (!currentUser || !friend) return { description: 'Transaction', amount: 0, color: 'text-slate-600', subtext: '', icon: <Users/> };
+  const getTransactionInfo = (transaction: Transaction) => {
+    if (!currentUser || !friend) return { description: 'Transaction', amount: 0, color: 'text-slate-600', subtext: '', icon: <Users /> };
 
-  // Settlement logic remains the same
-  if (transaction.description?.startsWith('SETTLEMENT:')) {
-    // ... (your existing settlement code is correct)
-  }
-  
-  // --- THIS IS THE NEW, CORRECTED LOGIC for shared expenses ---
-  if (transaction.type === 'shared' && transaction.split_details) {
-    const participants = transaction.split_details.participants;
-    
-    // Find what you and your friend were supposed to pay (your shares)
-    const myShare = participants.find(p => p.user_id === currentUser.id)?.share_amount || 0;
-    const friendShare = participants.find(p => p.user_id === friend.id)?.share_amount || 0;
-
-    // Find what you and your friend actually paid
-    const myPayment = transaction.payers.find(p => p.user_id === currentUser.id)?.amount_paid || 0;
-    const friendPayment = transaction.payers.find(p => p.user_id === friend.id)?.amount_paid || 0;
-    
-    // Calculate each person's balance for this one transaction
-    // Negative means they overpaid (are owed), positive means they underpaid (they owe)
-    const myBalance = myShare - myPayment; 
-    const friendBalance = friendShare - friendPayment; 
-
-    // Create a helpful summary of who paid for the expense
-    const payersSummary = transaction.payers
-        .map(p => (profilesMap.get(p.user_id)?.display_name || 'Someone'))
-        .join(', ');
-
-    // SCENARIO 1: You overpaid, and your friend underpaid. You lent money to your friend.
-    if (myBalance < 0 && friendBalance > 0) {
-      // The amount is the smaller of what you're owed or what they owe, relevant to this transaction
-      const amountFriendOwesYou = Math.min(Math.abs(myBalance), friendBalance);
-      return {
-        description: transaction.description,
-        amount: amountFriendOwesYou,
-        color: 'text-emerald-600', // You are owed (green)
-        subtext: `You paid for ${friend.display_name}`,
-        icon: <Users className="h-5 w-5 text-purple-600"/>
-      };
-    } 
-    // SCENARIO 2: You underpaid, and your friend overpaid. Your friend lent money to you.
-    else if (myBalance > 0 && friendBalance < 0) {
-      // The amount is the smaller of what you owe or what they're owed
-      const amountYouOweFriend = Math.min(myBalance, Math.abs(friendBalance));
-       return {
-        description: transaction.description,
-        amount: amountYouOweFriend,
-        color: 'text-red-600', // You owe (red)
-        subtext: `${friend.display_name} paid for you`,
-        icon: <Users className="h-5 w-5 text-purple-600"/>
-      };
+    // Settlement transactions
+    if (transaction.description?.startsWith('SETTLEMENT:')) {
+      if (transaction.description.includes(`Paid ${friend.email}`)) {
+        return {
+          description: 'Settlement Payment',
+          amount: transaction.amount,
+          color: 'text-emerald-600',
+          subtext: `You paid ${friend.display_name || friend.email.split('@')[0]}`,
+          icon: <DollarSign className="h-5 w-5 text-emerald-600" />,
+        };
+      } else if (transaction.description.includes(`Received from ${friend.email}`)) {
+        return {
+          description: 'Settlement Received',
+          amount: transaction.amount,
+          color: 'text-red-600',
+          subtext: `${friend.display_name || friend.email.split('@')[0]} paid you`,
+          icon: <DollarSign className="h-5 w-5 text-red-600" />,
+        };
+      }
     }
-    // SCENARIO 3: You and the friend are both settled, or the debt is with other people.
-    else {
-      return {
-        description: transaction.description,
-        amount: 0,
-        color: 'text-slate-600',
-        subtext: `You and ${friend.display_name} are settled for this item`,
-        icon: <Users className="h-5 w-5 text-purple-600"/>
-      };
+
+    // Shared expenses
+    if (transaction.type === 'shared' && transaction.split_details) {
+      const participants = transaction.split_details.participants;
+      const myShare = participants.find(p => p.user_id === currentUser.id)?.share_amount || 0;
+      const friendShare = participants.find(p => p.user_id === friend.id)?.share_amount || 0;
+      const myPayment = transaction.payers.find(p => p.user_id === currentUser.id)?.amount_paid || 0;
+      const friendPayment = transaction.payers.find(p => p.user_id === friend.id)?.amount_paid || 0;
+
+      const myBalance = myShare - myPayment;
+      const friendBal = friendShare - friendPayment;
+
+      if (myBalance < 0 && friendBal > 0) {
+        const amountFriendOwesYou = Math.min(Math.abs(myBalance), friendBal);
+        return {
+          description: transaction.description,
+          amount: amountFriendOwesYou,
+          color: 'text-emerald-600',
+          subtext: `You paid for ${friend.display_name || friend.email.split('@')[0]}`,
+          icon: <Users className="h-5 w-5 text-purple-600" />,
+        };
+      } else if (myBalance > 0 && friendBal < 0) {
+        const amountYouOweFriend = Math.min(myBalance, Math.abs(friendBal));
+        return {
+          description: transaction.description,
+          amount: amountYouOweFriend,
+          color: 'text-red-600',
+          subtext: `${friend.display_name || friend.email.split('@')[0]} paid for you`,
+          icon: <Users className="h-5 w-5 text-purple-600" />,
+        };
+      } else {
+        return {
+          description: transaction.description,
+          amount: 0,
+          color: 'text-slate-600',
+          subtext: `You and ${friend.display_name || friend.email.split('@')[0]} are settled for this item`,
+          icon: <Users className="h-5 w-5 text-purple-600" />,
+        };
+      }
     }
-  }
 
-  // Fallback for any other transaction types
-  return { description: 'Transaction', amount: 0, color: 'text-slate-600', subtext: '', icon: <Users/> };
-};
-  
-  const getInitials = (name: string) => name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2);
-  const getAvatarColor = (name: string) => { /* ... same as before ... */ return 'bg-blue-500'; };
+    return { description: 'Transaction', amount: 0, color: 'text-slate-600', subtext: '', icon: <Users /> };
+  };
 
-  if (loading) return <div>Loading...</div>; // Simplified loading state
-  if (error || !friend) return <div>Error: {error} <button onClick={onBack}>Back</button></div>; // Simplified error state
+  const getInitials = (name: string) => name ? name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2) : '';
+  const getAvatarColor = (name: string) => {
+    const colors = ['bg-blue-500', 'bg-emerald-500', 'bg-purple-500', 'bg-red-500', 'bg-yellow-500', 'bg-pink-500', 'bg-indigo-500', 'bg-orange-500'];
+    return name ? colors[name.charCodeAt(0) % colors.length] : colors[0];
+  };
+
+  if (loading) return <div className="text-center p-8">Loading...</div>;
+  if (error || !friend) return <div className="text-center p-8 text-red-500">Error: {error} <button onClick={onBack} className="ml-2 text-blue-500 underline">Back</button></div>;
 
   return (
     <div className="space-y-4">
@@ -253,7 +244,6 @@ const getTransactionInfo = (transaction: Transaction) => {
                     </div>
                     <div className="text-right">
                       <p className={`font-semibold ${info.color}`}>{formatCurrency(info.amount)}</p>
-                      <p className="text-xs text-slate-500 dark:text-slate-400">{info.direction}</p>
                     </div>
                   </div>
                 </div>

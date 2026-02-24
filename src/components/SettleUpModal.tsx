@@ -1,9 +1,9 @@
 import React, { useState } from 'react';
 import { X, Save, CreditCard, Banknote, ArrowRight } from 'lucide-react';
-import { PaymentMode } from '../types';
+import { PaymentMode, UserProfile } from '../types';
 import { transactionService } from '../services/transactionService';
-import { UserProfile } from '../services/userService';
 import { useAuth } from '../contexts/AuthContext';
+import { useTransactionSync } from '../contexts/TransactionSyncContext';
 
 
 
@@ -34,6 +34,7 @@ const SettleUpModal: React.FC<SettleUpModalProps> = ({
 }) => {
 
   const { user } = useAuth();
+  const { refreshBalances, refreshTransactions } = useTransactionSync();
 
   const [amount, setAmount] = useState(Math.abs(currentBalance).toString());
 
@@ -123,7 +124,8 @@ const SettleUpModal: React.FC<SettleUpModalProps> = ({
 
       console.log('Settlement transaction created successfully');
 
-      
+      // Refresh global state so balances update across all components
+      await Promise.all([refreshBalances(), refreshTransactions()]);
 
       onSettled();
 
