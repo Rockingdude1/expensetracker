@@ -157,17 +157,19 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
           {transaction.payers && transaction.payers.length > 0 && (
             <div>
               <h3 className="text-lg font-semibold text-slate-900 dark:text-white mb-4">
-                Payer
+                {transaction.payers.length > 1 ? 'Payers' : 'Payer'}
               </h3>
-              <div className="bg-slate-50 dark:bg-slate-700 rounded-lg p-4">
-                <div className="flex items-center justify-between">
-                  <span className="font-medium text-slate-900 dark:text-white">
-                    {getUserName(transaction.payers[0].user_id)}
-                  </span>
-                  <span className="font-semibold text-slate-900 dark:text-white">
-                    {formatCurrency(transaction.payers[0].amount_paid)}
-                  </span>
-                </div>
+              <div className="bg-slate-50 dark:bg-slate-700 rounded-lg p-4 space-y-2">
+                {transaction.payers.map((payer, index) => (
+                  <div key={index} className="flex items-center justify-between">
+                    <span className="font-medium text-slate-900 dark:text-white">
+                      {getUserName(payer.user_id)}
+                    </span>
+                    <span className="font-semibold text-slate-900 dark:text-white">
+                      {formatCurrency(payer.amount_paid)}
+                    </span>
+                  </div>
+                ))}
               </div>
             </div>
           )}

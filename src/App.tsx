@@ -1,10 +1,11 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, lazy, Suspense } from 'react';
 import { Plus, TrendingUp, TrendingDown, CreditCard, Banknote, Users, Calendar, ChevronDown, Moon, Sun, LogOut, User } from 'lucide-react';
-import Dashboard from './components/Dashboard';
-import AddTransaction from './components/AddTransaction';
-import TransactionHistory from './components/TransactionHistory';
-import FriendsList from './components/FriendsList';
+const Dashboard = lazy(() => import('./components/Dashboard'));
+const AddTransaction = lazy(() => import('./components/AddTransaction'));
+const TransactionHistory = lazy(() => import('./components/TransactionHistory'));
+const FriendsList = lazy(() => import('./components/FriendsList'));
 import AuthGuard from './components/AuthGuard';
+import NotificationSettings from './components/NotificationSettings';
 import { Transaction, TransactionType, PaymentMode, UserProfile } from './types';
 import { useTheme } from './contexts/ThemeContext';
 import { useAuth } from './contexts/AuthContext';
@@ -27,66 +28,70 @@ function App() {
     addTransactionOptimistic,
     updateTransactionOptimistic,
     removeTransactionOptimistic,
+    rollbackTransactionOptimistic,
   } = useTransactionSync();
 
   const [currentView, setCurrentView] = useState<'dashboard' | 'add' | 'history' | 'friends'>('dashboard');
   const [selectedMonthYear, setSelectedMonthYear] = useState<string>(getCurrentMonthYear());
+  const selectedMonthYearRef = React.useRef(selectedMonthYear);
   const [availableMonths, setAvailableMonths] = useState<string[]>([getCurrentMonthYear()]);
   const [showMonthDropdown, setShowMonthDropdown] = useState(false);
   const [showUserMenu, setShowUserMenu] = useState(false);
-  const [actionLoading, setActionLoading] = useState(false);
+
+  // Keep ref in sync with state so the effect below can read it without a dep
+  useEffect(() => { selectedMonthYearRef.current = selectedMonthYear; }, [selectedMonthYear]);
 
   // Update available months when transactions change
   useEffect(() => {
     const currentMonth = getCurrentMonthYear();
     const monthsWithTransactions = new Set<string>();
 
-    // Always include current month
     monthsWithTransactions.add(currentMonth);
-
-    // Add months that have transactions
     transactions.forEach(transaction => {
-      const monthYear = getMonthYearFromDate(transaction.date);
-      monthsWithTransactions.add(monthYear);
+      monthsWithTransactions.add(getMonthYearFromDate(transaction.date));
     });
 
-    // Convert to sorted array (newest first)
     const sortedMonths = Array.from(monthsWithTransactions).sort((a, b) => b.localeCompare(a));
     setAvailableMonths(sortedMonths);
 
-    // If selected month is no longer available, default to current month
-    if (!sortedMonths.includes(selectedMonthYear)) {
+    // If selected month is no longer in the list, fall back to current month
+    if (!sortedMonths.includes(selectedMonthYearRef.current)) {
       setSelectedMonthYear(currentMonth);
     }
-  }, [transactions, selectedMonthYear]);
+  }, [transactions]);
 
   const addTransaction = async (transaction: Omit<Transaction, 'id' | 'date'>) => {
     if (!user) return;
 
-    setActionLoading(true);
     setError(null);
 
+    // Build a temporary record so the UI updates instantly
+    const tempId = `temp-${Date.now()}`;
+    const optimisticTransaction: Transaction = {
+      ...transaction,
+      id: tempId,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
+    addTransactionOptimistic(optimisticTransaction);
+    setCurrentView('dashboard');
+
     try {
-      const transactionWithDate = {
-        ...transaction,
-        date: new Date().toISOString(),
-      };
+      const saved = await transactionService.addTransaction(transaction, user);
+      // Replace the temp record with the real one from the DB
+      updateTransactionOptimistic(tempId, saved);
 
-      const newTransaction = await transactionService.addTransaction(transactionWithDate, user);
-      // Optimistically add to local state; real-time will confirm
-      addTransactionOptimistic(newTransaction);
-
-      // Refresh balances since debt trigger may have fired
-      await refreshBalances();
-      await transactionService.calculateAndStoreMonthlyBalances(user.id, [newTransaction, ...transactions]);
-
-      setCurrentView('dashboard');
+      // Only shared/settlement transactions affect balances
+      const affectsBalances =
+        saved.type === 'shared' ||
+        (saved.type === 'personal' && saved.description?.startsWith('SETTLEMENT:'));
+      if (affectsBalances) refreshBalances();
     } catch (err) {
       console.error('Error adding transaction:', err);
+      // Remove the optimistic record since the save failed
+      rollbackTransactionOptimistic(tempId);
       setError('Failed to add transaction. Please check your internet connection and try again.');
-      // Real-time will re-sync on next event
-    } finally {
-      setActionLoading(false);
     }
   };
 
@@ -102,9 +107,6 @@ function App() {
 
       // Refresh balances since debt trigger cleans up debts on soft-delete
       await refreshBalances();
-
-      const updatedTransactions = transactions.map(t => t.id === id ? updatedTransaction : t);
-      await transactionService.calculateAndStoreMonthlyBalances(user.id, updatedTransactions);
     } catch (err) {
       console.error('Error deleting transaction:', err);
       setError('Failed to delete transaction. Please try again.');
@@ -116,24 +118,30 @@ function App() {
   const updateTransaction = async (id: string, updates: Partial<Transaction>) => {
     if (!user) return;
 
-    setActionLoading(true);
     setError(null);
 
+    // Snapshot the original in case we need to revert
+    const original = transactions.find(t => t.id === id);
+
+    // Apply update instantly
+    if (original) {
+      updateTransactionOptimistic(id, { ...original, ...updates });
+    }
+
     try {
-      const updatedTransaction = await transactionService.updateTransaction(id, updates, user);
-      updateTransactionOptimistic(id, updatedTransaction);
+      const saved = await transactionService.updateTransaction(id, updates, user);
+      // Replace optimistic version with the real DB record (has updated_at, activity_log, etc.)
+      updateTransactionOptimistic(id, saved);
 
-      // Refresh balances since debt trigger may have recalculated
-      await refreshBalances();
-
-      const updatedTransactions = transactions.map(t => t.id === id ? updatedTransaction : t);
-      await transactionService.calculateAndStoreMonthlyBalances(user.id, updatedTransactions);
+      const affectsBalances =
+        saved.type === 'shared' ||
+        (saved.type === 'personal' && saved.description?.startsWith('SETTLEMENT:'));
+      if (affectsBalances) refreshBalances();
     } catch (err) {
       console.error('Error updating transaction:', err);
+      // Revert to original
+      if (original) updateTransactionOptimistic(id, original);
       setError('Failed to update transaction. Please check your internet connection and try again.');
-      await refreshAll();
-    } finally {
-      setActionLoading(false);
     }
   };
 
@@ -146,6 +154,28 @@ function App() {
 
   const filteredTransactions = getFilteredTransactions();
 
+  // Compute opening balance for selected month client-side from all transactions.
+  // Opening = net of all revenue minus actual cash spent before the selected month starts.
+  const openingBalance = React.useMemo(() => {
+    if (!user) return 0;
+    let net = 0;
+    for (const tx of transactions) {
+      if (tx.deleted_at) continue;
+      const txMonth = getMonthYearFromDate(tx.date);
+      if (txMonth >= selectedMonthYear) continue; // only transactions before this month
+      if (tx.type === 'revenue') {
+        net += tx.amount;
+      } else if (tx.type === 'personal' || tx.type === 'shared') {
+        // Use actual amount paid (cash out of pocket), not share amount
+        const myPayment = tx.type === 'shared'
+          ? (tx.payers?.find(p => p.user_id === user.id)?.amount_paid || 0)
+          : tx.amount;
+        net -= myPayment;
+      }
+    }
+    return Math.round(net);
+  }, [transactions, selectedMonthYear, user]);
+
   const handleSignOut = async () => {
     await signOut();
     setError(null);
@@ -153,7 +183,7 @@ function App() {
     setShowUserMenu(false);
   };
 
-  const isLoading = loading || actionLoading;
+  const isLoading = loading;
 
   return (
     <AuthGuard>
@@ -249,7 +279,7 @@ function App() {
                   </button>
 
                   {showUserMenu && (
-                    <div className="absolute right-0 top-full mt-2 bg-white dark:bg-slate-800 rounded-lg shadow-lg border border-slate-200 dark:border-slate-700 py-2 min-w-48 z-10">
+                    <div className="absolute right-0 top-full mt-2 bg-white dark:bg-slate-800 rounded-lg shadow-lg border border-slate-200 dark:border-slate-700 py-2 min-w-64 z-10">
                       <div className="px-4 py-2 border-b border-slate-200 dark:border-slate-700">
                         <p className="text-sm font-medium text-slate-900 dark:text-white truncate">
                           {user?.email}
@@ -257,6 +287,9 @@ function App() {
                         <p className="text-xs text-slate-500 dark:text-slate-400">
                           Signed in
                         </p>
+                      </div>
+                      <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-700">
+                        <NotificationSettings />
                       </div>
                       <button
                         onClick={handleSignOut}
@@ -321,44 +354,45 @@ function App() {
           </div>
         </nav>
 
+        {/* Slim loading bar — doesn't block content */}
+        {isLoading && (
+          <div className="h-0.5 w-full bg-slate-200 dark:bg-slate-700 overflow-hidden">
+            <div className="h-full bg-emerald-500 animate-pulse w-full" />
+          </div>
+        )}
+
         {/* Main Content */}
         <main className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8 relative">
-          {/* Loading Overlay */}
-          {isLoading && (
-            <div className="absolute inset-0 bg-white/50 dark:bg-slate-900/50 backdrop-blur-sm z-10 flex items-center justify-center">
-              <div className="bg-white dark:bg-slate-800 rounded-lg shadow-lg p-6 flex items-center space-x-3">
-                <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-emerald-500"></div>
-                <span className="text-slate-700 dark:text-slate-300">Syncing transactions...</span>
-              </div>
-            </div>
-          )}
 
-          {currentView === 'dashboard' && (
-            <Dashboard
-              transactions={filteredTransactions}
-              period={selectedMonthYear}
-              friendBalances={friendBalances}
-              onAddTransaction={() => setCurrentView('add')}
-            />
-          )}
-          {currentView === 'add' && (
-            <AddTransaction
-              onSubmit={addTransaction}
-              onCancel={() => setCurrentView('dashboard')}
-            />
-          )}
-          {currentView === 'friends' && (
-            <FriendsList />
-          )}
-          {currentView === 'history' && (
-            <TransactionHistory
-              transactions={filteredTransactions}
-              period={selectedMonthYear}
-              profilesMap={profilesMap}
-              onDeleteTransaction={deleteTransaction}
-              onUpdateTransaction={updateTransaction}
-            />
-          )}
+          <Suspense fallback={<div className="flex items-center justify-center py-16"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-emerald-500" /></div>}>
+            {currentView === 'dashboard' && (
+              <Dashboard
+                transactions={filteredTransactions}
+                period={selectedMonthYear}
+                friendBalances={friendBalances}
+                openingBalance={openingBalance}
+                onAddTransaction={() => setCurrentView('add')}
+              />
+            )}
+            {currentView === 'add' && (
+              <AddTransaction
+                onSubmit={addTransaction}
+                onCancel={() => setCurrentView('dashboard')}
+              />
+            )}
+            {currentView === 'friends' && (
+              <FriendsList />
+            )}
+            {currentView === 'history' && (
+              <TransactionHistory
+                transactions={filteredTransactions}
+                period={selectedMonthYear}
+                profilesMap={profilesMap}
+                onDeleteTransaction={deleteTransaction}
+                onUpdateTransaction={updateTransaction}
+              />
+            )}
+          </Suspense>
         </main>
 
         {/* Floating Action Button */}

@@ -134,6 +134,26 @@ export const userService = {
     }
   },
 
+  // Reject (delete) a pending friend request
+  async rejectFriendRequest(connectionId: string): Promise<{ success: boolean; error?: string }> {
+    try {
+      const { error } = await supabase
+        .from('user_connections')
+        .delete()
+        .eq('id', connectionId);
+
+      if (error) {
+        console.error('Error rejecting friend request:', error);
+        return { success: false, error: 'Failed to reject friend request' };
+      }
+
+      return { success: true };
+    } catch (error) {
+      console.error('Error in rejectFriendRequest:', error);
+      return { success: false, error: 'An unexpected error occurred' };
+    }
+  },
+
   // Get pending friend requests received by current user
   async getPendingFriendRequests(): Promise<UserConnection[]> {
     try {
@@ -158,76 +178,155 @@ export const userService = {
     }
   },
   
-  // UPDATED: Get all accepted friends (more efficient)
+  // Get all accepted friends (real + guest)
   async getFriends(): Promise<UserProfile[]> {
     try {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) return [];
 
-      const { data: connections, error } = await supabase
-        .from('user_connections')
-        .select('user_id_1, user_id_2, user_profiles_user_id_1:user_id_1(*), user_profiles_user_id_2:user_id_2(*)')
-        .or(`user_id_1.eq.${user.id},user_id_2.eq.${user.id}`)
-        .eq('status', 'accepted');
+      const [connectionsResult, guestsResult] = await Promise.all([
+        supabase
+          .from('user_connections')
+          .select('user_id_1, user_id_2, user_profiles_user_id_1:user_id_1(*), user_profiles_user_id_2:user_id_2(*)')
+          .or(`user_id_1.eq.${user.id},user_id_2.eq.${user.id}`)
+          .eq('status', 'accepted'),
+        supabase
+          .from('user_profiles')
+          .select('*')
+          .eq('created_by', user.id)
+          .eq('is_guest', true),
+      ]);
 
-      if (error) {
-        console.error('Error fetching friends:', error);
-        return [];
-      }
-
-      const friends = connections.map(conn => {
+      const realFriends = (connectionsResult.data || []).map(conn => {
         return conn.user_id_1 === user.id ? conn.user_profiles_user_id_2 : conn.user_profiles_user_id_1;
-      });
+      }).filter(p => p !== null && p.id !== null) as UserProfile[];
 
-      return friends.filter(p => p !== null && p.id !== null) as UserProfile[];
+      const guestFriends = (guestsResult.data || []) as UserProfile[];
+
+      return [...realFriends, ...guestFriends];
     } catch (error) {
       console.error('Error in getFriends:', error);
       return [];
     }
   },
+
+  // Add a guest friend (not on the app yet)
+  async addGuestFriend(displayName: string, email?: string): Promise<{ success: boolean; profile?: UserProfile; error?: string }> {
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return { success: false, error: 'Not authenticated' };
+
+      // Check for duplicate guest name under this creator
+      const { data: existing } = await supabase
+        .from('user_profiles')
+        .select('id')
+        .eq('created_by', user.id)
+        .eq('is_guest', true)
+        .ilike('display_name', displayName.trim())
+        .maybeSingle();
+
+      if (existing) {
+        return { success: false, error: 'A guest friend with that name already exists' };
+      }
+
+      const { data, error } = await supabase
+        .from('user_profiles')
+        .insert({
+          id: crypto.randomUUID(),
+          display_name: displayName.trim(),
+          email: email?.trim() || '',
+          is_guest: true,
+          created_by: user.id,
+        })
+        .select()
+        .single();
+
+      if (error) {
+        console.error('Error adding guest friend:', error);
+        return { success: false, error: 'Failed to add guest friend' };
+      }
+
+      return { success: true, profile: data as UserProfile };
+    } catch (error) {
+      console.error('Error in addGuestFriend:', error);
+      return { success: false, error: 'An unexpected error occurred' };
+    }
+  },
+
+  // Remove a guest friend (only guests created by current user)
+  async removeGuestFriend(guestId: string): Promise<{ success: boolean; error?: string }> {
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return { success: false, error: 'Not authenticated' };
+
+      const { error } = await supabase
+        .from('user_profiles')
+        .delete()
+        .eq('id', guestId)
+        .eq('created_by', user.id)
+        .eq('is_guest', true);
+
+      if (error) {
+        console.error('Error removing guest friend:', error);
+        return { success: false, error: 'Failed to remove guest friend' };
+      }
+
+      return { success: true };
+    } catch (error) {
+      console.error('Error in removeGuestFriend:', error);
+      return { success: false, error: 'An unexpected error occurred' };
+    }
+  },
   
-  // Simplified: Query the debts table directly instead of recalculating in JavaScript
+  // Optimized: runs debts + friends queries in parallel instead of sequentially
   async getFriendBalances(): Promise<FriendBalance[]> {
     try {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) return [];
 
-      // Get all debts where current user is involved
-      const { data: debts, error: debtsError } = await supabase
-        .from('debts')
-        .select('debtor_id, creditor_id, amount')
-        .or(`debtor_id.eq.${user.id},creditor_id.eq.${user.id}`);
+      // Run both queries in parallel — cuts load time in half
+      const [debtsResult, connectionsResult] = await Promise.all([
+        supabase
+          .from('debts')
+          .select('debtor_id, creditor_id, amount')
+          .or(`debtor_id.eq.${user.id},creditor_id.eq.${user.id}`),
+        supabase
+          .from('user_connections')
+          .select('user_id_1, user_id_2, user_profiles_user_id_1:user_id_1(*), user_profiles_user_id_2:user_id_2(*)')
+          .or(`user_id_1.eq.${user.id},user_id_2.eq.${user.id}`)
+          .eq('status', 'accepted'),
+      ]);
 
-      if (debtsError) {
-        console.error('Error fetching debts for balance:', debtsError);
+      if (debtsResult.error) {
+        console.error('Error fetching debts for balance:', debtsResult.error);
+        return [];
+      }
+      if (connectionsResult.error) {
+        console.error('Error fetching friends:', connectionsResult.error);
         return [];
       }
 
-      // Build a map of friend_id -> net balance
-      const balanceMap = new Map<string, number>();
+      // Extract friend profiles from connections
+      const friends = (connectionsResult.data || [])
+        .map(conn => conn.user_id_1 === user.id ? conn.user_profiles_user_id_2 : conn.user_profiles_user_id_1)
+        .filter(p => p !== null && p.id !== null) as UserProfile[];
+      const friendProfileMap = new Map(friends.map(f => [f.id, f]));
 
-      for (const debt of (debts || [])) {
+      // Build a map of friend_id -> net balance from debts
+      const balanceMap = new Map<string, number>();
+      for (const debt of (debtsResult.data || [])) {
         if (debt.debtor_id === user.id) {
-          // I am the debtor -> I owe this creditor (negative balance for me)
           const friendId = debt.creditor_id;
-          const current = balanceMap.get(friendId) || 0;
-          balanceMap.set(friendId, current - parseFloat(debt.amount));
+          balanceMap.set(friendId, (balanceMap.get(friendId) || 0) - parseFloat(debt.amount));
         } else {
-          // I am the creditor -> this debtor owes me (positive balance for me)
           const friendId = debt.debtor_id;
-          const current = balanceMap.get(friendId) || 0;
-          balanceMap.set(friendId, current + parseFloat(debt.amount));
+          balanceMap.set(friendId, (balanceMap.get(friendId) || 0) + parseFloat(debt.amount));
         }
       }
-
-      // Get friend profiles
-      const friends = await this.getFriends();
-      const friendProfileMap = new Map(friends.map(f => [f.id, f]));
 
       // Build FriendBalance array
       const friendBalances: FriendBalance[] = [];
 
-      // Add friends with non-zero balances from debts
       for (const [friendId, balance] of balanceMap.entries()) {
         const profile = friendProfileMap.get(friendId);
         friendBalances.push({

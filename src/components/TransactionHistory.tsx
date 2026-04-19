@@ -1,12 +1,12 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { CreditCard, Banknote, Users, ArrowUpRight, ArrowDownRight, Trash2, Edit3, Search, Filter, X, Calendar, ChevronDown, AlertTriangle } from 'lucide-react';
 import { Transaction, UserProfile } from '../types';
 import { useAuth } from '../contexts/AuthContext';
 import EditTransactionModal from './EditTransactionModal';
 import TransactionDetailModal from './TransactionDetailModal';
 import { formatMonthYear } from '../utils/dateUtils';
-import { userService } from '../services/userService';
 import ConfirmationModal from './ConfirmationModal';
+import { useTransactionData } from '../contexts/TransactionSyncContext';
 
 interface TransactionHistoryProps {
   transactions: Transaction[];
@@ -16,8 +16,9 @@ interface TransactionHistoryProps {
   onUpdateTransaction: (id: string, updates: Partial<Transaction>) => void;
 }
 
-const TransactionHistory: React.FC<TransactionHistoryProps> = ({ transactions, period, profilesMap, onDeleteTransaction, onUpdateTransaction }) => {
+const TransactionHistory: React.FC<TransactionHistoryProps> = React.memo(({ transactions, period, profilesMap, onDeleteTransaction, onUpdateTransaction }) => {
   const { user: currentUser } = useAuth();
+  const { friends } = useTransactionData();
   const [searchQuery, setSearchQuery] = useState('');
   const [editingTransaction, setEditingTransaction] = useState<Transaction | null>(null);
   const [selectedTransaction, setSelectedTransaction] = useState<Transaction | null>(null);
@@ -34,16 +35,6 @@ const TransactionHistory: React.FC<TransactionHistoryProps> = ({ transactions, p
   const [showCustomDatePicker, setShowCustomDatePicker] = useState(false);
   const [customStartDate, setCustomStartDate] = useState<Date | null>(null);
   const [customEndDate, setCustomEndDate] = useState<Date | null>(null);
-  const [friends, setFriends] = useState<UserProfile[]>([]);
-
-  // Load friends for filter
-  useEffect(() => {
-    const loadFriends = async () => {
-      const friendsList = await userService.getFriends();
-      setFriends(friendsList);
-    };
-    loadFriends();
-  }, []);
 
   // --- Delete Confirmation Logic ---
 const handlePrepareDelete = (transactionId: string) => {
@@ -104,22 +95,28 @@ const getTransactionSummary = (transaction: Transaction) => {
   const participantCount = transaction.split_details?.participants.length || 0;
   let payersSummary = '';
 
-  // Correctly handles the single-payer case
   if (transaction.payers.length === 1) {
     const payerId = transaction.payers[0].user_id;
     const payerProfile = profilesMap.get(payerId);
-    const payerName = payerId === currentUser?.id 
-        ? 'You' 
-        : payerProfile?.display_name || payerProfile?.email?.split('@')[0] || 'Someone';
+    const payerName = payerId === currentUser?.id
+      ? 'You'
+      : payerProfile?.display_name || payerProfile?.email?.split('@')[0] || 'Someone';
     payersSummary = `${payerName} paid`;
-  } 
-  // Adds a new summary for the multi-payer case
-  else {
-    payersSummary = 'Multiple people paid';
+  } else {
+    const names = transaction.payers.map(p => {
+      if (p.user_id === currentUser?.id) return 'You';
+      const profile = profilesMap.get(p.user_id);
+      return profile?.display_name || profile?.email?.split('@')[0] || 'Someone';
+    });
+    if (names.length === 2) {
+      payersSummary = `${names[0]} & ${names[1]} paid`;
+    } else {
+      payersSummary = `${names.slice(0, 2).join(', ')} & ${names.length - 2} more paid`;
+    }
   }
 
   return `${payersSummary} • Split with ${participantCount} people`;
-}; 
+};
 
   const getCategoryLabel = (category?: string) => {
     const categoryLabels: Record<string, string> = { rent: 'Rent', food: 'Food', social: 'Social Life', transport: 'Transport', apparel: 'Apparel', beauty: 'Beauty', education: 'Education', other: 'Other' };
@@ -155,7 +152,7 @@ const getTransactionSummary = (transaction: Transaction) => {
     return count;
   };
 
-  const filteredTransactions = transactions.filter(transaction => {
+  const filteredTransactions = useMemo(() => transactions.filter(transaction => {
     // Search query filter
     const query = searchQuery.toLowerCase();
     let matchesSearch = !searchQuery;
@@ -234,7 +231,7 @@ const getTransactionSummary = (transaction: Transaction) => {
     }
 
     return true;
-  });
+  }), [transactions, searchQuery, dateFilter, amountFilter, paymentModeFilter, categoryFilter, friendsFilter, customStartDate, customEndDate, profilesMap, currentUser]);
 
   return (
     <div className="space-y-6">
@@ -703,6 +700,6 @@ const getTransactionSummary = (transaction: Transaction) => {
 />
     </div>
   );
-};
+});
 
 export default TransactionHistory;

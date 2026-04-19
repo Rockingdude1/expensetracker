@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { Target, Edit3, Save, X } from 'lucide-react';
 import { Transaction } from '../types';
 import { formatMonthYear } from '../utils/dateUtils';
@@ -14,31 +14,23 @@ interface BudgetTrackerProps {
   period: string;
 }
 
-const BudgetTracker: React.FC<BudgetTrackerProps> = ({ transactions, period }) => {
+const BudgetTracker: React.FC<BudgetTrackerProps> = React.memo(({ transactions, period }) => {
   const { user: currentUser } = useAuth();
-  const [budget, setBudget] = useState<Budget>(() => {
-    const saved = localStorage.getItem(`expense-tracker-budget-${period}`);
-    return saved ? JSON.parse(saved) : { totalBudget: 1000, period };
-  });
+  const [budget, setBudget] = useState<Budget>({ totalBudget: 1000, period });
   const [isEditing, setIsEditing] = useState(false);
   const [editValue, setEditValue] = useState(budget.totalBudget.toString());
 
-  // --- MINIMAL CHANGE IS HERE ---
-  // The logic now correctly reads `split_details` for shared expenses
-  // and ignores settlements and deleted transactions.
-const totalSpent = Math.round(transactions
-  .filter(t => t.type !== 'revenue' && !t.deleted_at && !t.description?.startsWith('SETTLEMENT:'))
-  .reduce((sum, t) => {
-    if (t.type === 'shared' && t.split_details) {
-      const myShare = t.split_details.participants.find(p => p.user_id === currentUser?.id)?.share_amount || 0;
-      return sum + myShare;
-    }
-    if (t.type === 'personal') {
-      return sum + t.amount;
-    }
-    return sum;
-  }, 0));
-  // --- END OF CHANGE ---
+  const totalSpent = useMemo(() => Math.round(
+    transactions
+      .filter(t => t.type !== 'revenue' && !t.deleted_at && !t.description?.startsWith('SETTLEMENT:'))
+      .reduce((sum, t) => {
+        if (t.type === 'shared' && t.split_details) {
+          return sum + (t.split_details.participants.find(p => p.user_id === currentUser?.id)?.share_amount || 0);
+        }
+        if (t.type === 'personal') return sum + t.amount;
+        return sum;
+      }, 0)
+  ), [transactions, currentUser?.id]);
 
   const percentage = budget.totalBudget > 0 ? Math.min((totalSpent / budget.totalBudget) * 100, 100) : 0;
   const isOverBudget = totalSpent > budget.totalBudget;
@@ -46,13 +38,19 @@ const totalSpent = Math.round(transactions
   useEffect(() => {
     const saved = localStorage.getItem(`expense-tracker-budget-${period}`);
     if (saved) {
-      const savedBudget = JSON.parse(saved);
-      setBudget(savedBudget);
-      setEditValue(savedBudget.totalBudget.toString());
-    } else {
+      try {
+        const savedBudget = JSON.parse(saved);
+        setBudget(savedBudget);
+        setEditValue(savedBudget.totalBudget.toString());
+      } catch {
         const newBudget = { totalBudget: 1000, period };
         setBudget(newBudget);
-        setEditValue(newBudget.totalBudget.toString());
+        setEditValue('1000');
+      }
+    } else {
+      const newBudget = { totalBudget: 1000, period };
+      setBudget(newBudget);
+      setEditValue(newBudget.totalBudget.toString());
     }
   }, [period]);
 
@@ -235,6 +233,6 @@ const totalSpent = Math.round(transactions
       </div>
     </div>
   );
-};
+});
 
 export default BudgetTracker;

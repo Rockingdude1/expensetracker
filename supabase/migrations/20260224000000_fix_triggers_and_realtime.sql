@@ -322,3 +322,90 @@ UPDATE public.transactions
 SET updated_at = now()
 WHERE deleted_at IS NULL
   AND (type = 'shared' OR description LIKE 'SETTLEMENT:%');
+
+-- ============================================================
+-- 11. Helper function: recalculate all monthly balances for one user
+--     Groups transactions by month, chains opening/closing balances,
+--     and upserts into monthly_balances — all server-side.
+-- ============================================================
+CREATE OR REPLACE FUNCTION _recalc_user_monthly_balances(p_user_id UUID)
+RETURNS VOID AS $$
+DECLARE
+  v_month_record RECORD;
+  v_prev_closing NUMERIC := 0;
+BEGIN
+  FOR v_month_record IN
+    SELECT
+      substring(t.date from 1 for 7) AS month_year,
+      COALESCE(SUM(
+        CASE WHEN t.type = 'revenue' AND t.user_id = p_user_id THEN t.amount ELSE 0 END
+      ), 0) AS revenue,
+      COALESCE(SUM(
+        CASE
+          WHEN t.type = 'personal' AND t.user_id = p_user_id THEN t.amount
+          WHEN t.type = 'shared' THEN COALESCE(
+            (SELECT (p->>'amount_paid')::NUMERIC
+             FROM jsonb_array_elements(t.payers) p
+             WHERE (p->>'user_id') = p_user_id::TEXT
+             LIMIT 1), 0)
+          ELSE 0
+        END
+      ), 0) AS spent
+    FROM transactions t
+    WHERE t.deleted_at IS NULL
+      AND (t.user_id = p_user_id
+           OR t.payers @> ('[{"user_id": "' || p_user_id::TEXT || '"}]')::jsonb)
+    GROUP BY substring(t.date from 1 for 7)
+    ORDER BY substring(t.date from 1 for 7)
+  LOOP
+    INSERT INTO monthly_balances (user_id, month_year, opening_balance, closing_balance)
+    VALUES (p_user_id, v_month_record.month_year, v_prev_closing,
+            v_prev_closing + v_month_record.revenue - v_month_record.spent)
+    ON CONFLICT (user_id, month_year)
+    DO UPDATE SET
+      opening_balance = EXCLUDED.opening_balance,
+      closing_balance = EXCLUDED.closing_balance,
+      updated_at = now();
+
+    v_prev_closing := v_prev_closing + v_month_record.revenue - v_month_record.spent;
+  END LOOP;
+
+  -- Ensure current month row exists
+  INSERT INTO monthly_balances (user_id, month_year, opening_balance, closing_balance)
+  VALUES (p_user_id, to_char(now(), 'YYYY-MM'), v_prev_closing, v_prev_closing)
+  ON CONFLICT (user_id, month_year) DO NOTHING;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- ============================================================
+-- 12. Trigger: auto-recalculate monthly balances on transaction changes
+-- ============================================================
+CREATE OR REPLACE FUNCTION fn_update_monthly_balances()
+RETURNS TRIGGER AS $$
+DECLARE
+  v_payer_record RECORD;
+BEGIN
+  -- Always recalculate for the transaction creator
+  PERFORM _recalc_user_monthly_balances(NEW.user_id);
+
+  -- For shared expenses, also recalculate for each payer
+  IF NEW.type = 'shared' AND NEW.payers IS NOT NULL THEN
+    FOR v_payer_record IN
+      SELECT DISTINCT (p->>'user_id')::UUID AS uid
+      FROM jsonb_array_elements(NEW.payers) p
+      WHERE (p->>'user_id')::UUID != NEW.user_id
+    LOOP
+      PERFORM _recalc_user_monthly_balances(v_payer_record.uid);
+    END LOOP;
+  END IF;
+
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+DROP TRIGGER IF EXISTS after_transaction_monthly_balance ON public.transactions;
+
+CREATE TRIGGER after_transaction_monthly_balance
+  AFTER INSERT OR UPDATE ON public.transactions
+  FOR EACH ROW
+  EXECUTE FUNCTION fn_update_monthly_balances();

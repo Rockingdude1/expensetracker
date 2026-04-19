@@ -3,7 +3,7 @@ import { X, Save, CreditCard, Banknote, ArrowRight } from 'lucide-react';
 import { PaymentMode, UserProfile } from '../types';
 import { transactionService } from '../services/transactionService';
 import { useAuth } from '../contexts/AuthContext';
-import { useTransactionSync } from '../contexts/TransactionSyncContext';
+import { useTransactionActions } from '../contexts/TransactionSyncContext';
 
 
 
@@ -34,13 +34,12 @@ const SettleUpModal: React.FC<SettleUpModalProps> = ({
 }) => {
 
   const { user } = useAuth();
-  const { refreshBalances, refreshTransactions } = useTransactionSync();
+  const { addTransactionOptimistic, refreshBalances } = useTransactionActions();
 
   const [amount, setAmount] = useState(Math.abs(currentBalance).toString());
 
   const [paymentMode, setPaymentMode] = useState<PaymentMode>('cash');
 
-  const [isSubmitting, setIsSubmitting] = useState(false);
 
 
 
@@ -52,95 +51,54 @@ const SettleUpModal: React.FC<SettleUpModalProps> = ({
 
 
 
-  const handleSubmit = async (e: React.FormEvent) => {
-
+  const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (!user) return;
 
-    
-
-    if (!user) {
-
-      alert('You must be logged in to record a settlement');
-
+    const settlementAmount = parseFloat(amount);
+    if (settlementAmount <= 0) {
+      alert('Please enter a valid amount');
       return;
-
     }
 
-    
+    const settlementTransaction = {
+      type: youOwe ? 'personal' as const : 'revenue' as const,
+      amount: settlementAmount,
+      payment_mode: paymentMode,
+      description: youOwe
+        ? `SETTLEMENT: Paid ${friend.email}`
+        : `SETTLEMENT: Received from ${friend.email}`,
+      date: new Date().toISOString(),
+      category: undefined,
+      payers: [{ user_id: youOwe ? user.id : friend.id, amount_paid: settlementAmount }],
+      split_details: {
+        method: 'settlement' as const,
+        participants: [{ user_id: friend.id, share_amount: settlementAmount }],
+      },
+    };
 
-    setIsSubmitting(true);
+    // Optimistically add to transaction list so it appears immediately
+    addTransactionOptimistic({
+      ...settlementTransaction,
+      id: `temp-${Date.now()}`,
+      user_id: user.id,
+      activity_log: [],
+      deleted_at: undefined,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
 
+    // Close modal immediately — don't wait for DB
+    onSettled();
+    onClose();
 
-
-    try {
-
-      const settlementAmount = parseFloat(amount);
-
-      
-
-      if (settlementAmount <= 0) {
-
-        alert('Please enter a valid amount');
-
-        setIsSubmitting(false);
-
-        return;
-
-      }
-
-
-
-      // Create settlement transaction with split_details containing friend info
-      // so the DB trigger can identify the counterparty and create offset debt records
-      const settlementTransaction = {
-        type: youOwe ? 'personal' as const : 'revenue' as const,
-        amount: settlementAmount,
-        payment_mode: paymentMode,
-        description: youOwe
-          ? `SETTLEMENT: Paid ${friend.email}`
-          : `SETTLEMENT: Received from ${friend.email}`,
-        date: new Date().toISOString(),
-        category: undefined,
-        payers: [{
-          user_id: youOwe ? user.id : friend.id,
-          amount_paid: settlementAmount
-        }],
-        split_details: {
-          method: 'settlement' as const,
-          participants: [{
-            user_id: friend.id,
-            share_amount: settlementAmount
-          }]
-        }
-      };
-
-
-
-      console.log('Creating settlement transaction for user:', user.id);
-
-      await transactionService.addTransaction(settlementTransaction, user);
-
-      console.log('Settlement transaction created successfully');
-
-      // Refresh global state so balances update across all components
-      await Promise.all([refreshBalances(), refreshTransactions()]);
-
-      onSettled();
-
-      onClose();
-
-    } catch (error) {
-
-      console.error('Error creating settlement transaction:', error);
-
-      alert(`Failed to record settlement: ${error instanceof Error ? error.message : 'Unknown error'}. Please try again.`);
-
-    } finally {
-
-      setIsSubmitting(false);
-
-    }
-
+    // Fire DB call in background
+    transactionService.addTransaction(settlementTransaction, user)
+      .then(() => refreshBalances())
+      .catch((error) => {
+        console.error('Error creating settlement transaction:', error);
+        alert(`Settlement failed: ${error instanceof Error ? error.message : 'Unknown error'}. Please try again.`);
+      });
   };
 
 
@@ -381,9 +339,7 @@ const SettleUpModal: React.FC<SettleUpModalProps> = ({
 
               onClick={onClose}
 
-              disabled={isSubmitting}
-
-              className="px-6 py-3 border border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-300 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-700 font-medium transition-colors duration-200 disabled:opacity-50"
+              className="px-6 py-3 border border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-300 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-700 font-medium transition-colors duration-200"
 
             >
 
@@ -395,15 +351,13 @@ const SettleUpModal: React.FC<SettleUpModalProps> = ({
 
               type="submit"
 
-              disabled={isSubmitting}
-
-              className="flex items-center space-x-2 px-6 py-3 bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 text-white rounded-lg font-medium transition-all duration-200 transform hover:scale-105 disabled:opacity-50 disabled:transform-none"
+              className="flex items-center space-x-2 px-6 py-3 bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 text-white rounded-lg font-medium transition-all duration-200 transform hover:scale-105"
 
             >
 
               <Save className="h-5 w-5" />
 
-              <span>{isSubmitting ? 'Recording...' : 'Record Payment'}</span>
+              <span>Record Payment</span>
 
             </button>
 

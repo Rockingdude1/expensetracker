@@ -1,57 +1,67 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { Search, UserPlus, Users, Settings, ChevronRight, ArrowLeft, Check, X as XIcon } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
-import { useTransactionSync } from '../contexts/TransactionSyncContext';
+import { useTransactionData, useTransactionActions } from '../contexts/TransactionSyncContext';
 import { userService } from '../services/userService';
 import { UserProfile } from '../types';
 import AddFriendModal from './AddFriendModal';
 import FriendDetailView from './FriendDetailView';
 import FriendRequestsModal from './FriendRequestsModal';
 
-interface FriendBalance {
-  friend_id: string;
-  friend_name: string;
-  friend_email: string;
-  balance: number;
-}
-
 const FriendsList: React.FC = () => {
   const { user: currentUser } = useAuth();
-  const { refreshBalances } = useTransactionSync();
+  const { friendBalances: balancesMap, profilesMap, friends: contextFriends } = useTransactionData();
+  const { refreshBalances, refreshFriends } = useTransactionActions();
   const [searchQuery, setSearchQuery] = useState('');
   const [showSettledFriends, setShowSettledFriends] = useState(false);
   const [showAddFriendModal, setShowAddFriendModal] = useState(false);
   const [showRequestsModal, setShowRequestsModal] = useState(false);
   const [selectedFriendId, setSelectedFriendId] = useState<string | null>(null);
-  const [friendBalances, setFriendBalances] = useState<FriendBalance[]>([]);
+  const [selectedFriendProfile, setSelectedFriendProfile] = useState<UserProfile | undefined>(undefined);
   const [pendingRequests, setPendingRequests] = useState<any[]>([]);
-  const [loading, setLoading] = useState(true);
+  const allFriends = contextFriends;
   const [error, setError] = useState<string | null>(null);
 
+  // Derive FriendBalance display list from context data, merged with allFriends
+  // so guests with zero balance still appear
+  const friendBalances = useMemo(() => {
+    const seen = new Set<string>();
+    const list: { friend_id: string; friend_name: string; friend_email: string; balance: number; is_guest: boolean; linked_user_id?: string | null }[] = [];
+
+    // From debt balances
+    for (const [friendId, balance] of balancesMap.entries()) {
+      seen.add(friendId);
+      const profile = profilesMap.get(friendId) || allFriends.find(f => f.id === friendId);
+      list.push({
+        friend_id: friendId,
+        friend_name: profile?.display_name || profile?.email?.split('@')[0] || 'Unknown',
+        friend_email: profile?.email || '',
+        balance,
+        is_guest: profile?.is_guest ?? false,
+        linked_user_id: profile?.linked_user_id,
+      });
+    }
+
+    // Friends with no transactions (includes guests)
+    for (const friend of allFriends) {
+      if (!seen.has(friend.id)) {
+        list.push({
+          friend_id: friend.id,
+          friend_name: friend.display_name || friend.email?.split('@')[0] || 'Unknown',
+          friend_email: friend.email || '',
+          balance: 0,
+          is_guest: friend.is_guest ?? false,
+          linked_user_id: friend.linked_user_id,
+        });
+      }
+    }
+
+    return list;
+  }, [balancesMap, profilesMap, allFriends]);
+
   useEffect(() => {
-    if (currentUser) {
-      loadFriendBalances();
-      loadPendingRequests();
-    } else {
-      setLoading(false);
-    }
+    if (currentUser) loadPendingRequests();
   }, [currentUser]);
-
-  const loadFriendBalances = useCallback(async () => {
-    try {
-      setLoading(true);
-      setError(null);
-
-      // Reads directly from the debts table via the simplified service
-      const balances = await userService.getFriendBalances();
-      setFriendBalances(balances);
-    } catch (err) {
-      console.error('Error loading friend balances:', err);
-      setError('Failed to load friend balances');
-    } finally {
-      setLoading(false);
-    }
-  }, []);
 
   const loadPendingRequests = async () => {
     try {
@@ -63,11 +73,10 @@ const FriendsList: React.FC = () => {
   };
 
   const refreshData = useCallback(() => {
-    loadFriendBalances();
     loadPendingRequests();
-    // Also refresh the global sync context balances
+    refreshFriends();
     refreshBalances();
-  }, [loadFriendBalances, refreshBalances]);
+  }, [refreshBalances, refreshFriends]);
 
   const handleAcceptRequest = async (connectionId: string) => {
     try {
@@ -113,13 +122,12 @@ const FriendsList: React.FC = () => {
     return (
       <FriendDetailView
         friendId={selectedFriendId}
-        onBack={() => setSelectedFriendId(null)}
+        friendProfile={selectedFriendProfile}
+        onBack={() => { setSelectedFriendId(null); setSelectedFriendProfile(undefined); }}
         onBalanceUpdated={refreshData}
       />
     );
   }
-
-  if (loading) return <div className="text-center p-8">Loading balances...</div>;
 
   return (
     <div className="space-y-6">
@@ -150,14 +158,22 @@ const FriendsList: React.FC = () => {
             {filteredFriends.length === 0
              ? <div className="p-8 text-center"><Users className="h-12 w-12 mx-auto text-slate-400 mb-4" /><h3 className="font-semibold">No friends with active balances</h3></div>
              : filteredFriends.map((friend) => (
-                <div key={friend.friend_id} className="p-4 sm:p-6 hover:bg-slate-50 cursor-pointer" onClick={() => setSelectedFriendId(friend.friend_id)}>
+                <div key={friend.friend_id} className="p-4 sm:p-6 hover:bg-slate-50 dark:hover:bg-slate-700/50 cursor-pointer" onClick={() => { setSelectedFriendId(friend.friend_id); setSelectedFriendProfile(allFriends.find(f => f.id === friend.friend_id)); }}>
                     <div className="flex items-center justify-between">
                         <div className="flex items-center space-x-4">
                             <div className={`w-12 h-12 rounded-full ${getAvatarColor(friend.friend_name)} flex items-center justify-center text-white font-semibold`}>
                                 {getInitials(friend.friend_name)}
                             </div>
                             <div>
-                                <h3 className="font-semibold">{friend.friend_name}</h3>
+                                <div className="flex items-center space-x-2">
+                                    <h3 className="font-semibold text-slate-900 dark:text-white">{friend.friend_name}</h3>
+                                    {friend.is_guest && !friend.linked_user_id && (
+                                        <span className="text-xs px-1.5 py-0.5 bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 rounded font-medium">Guest</span>
+                                    )}
+                                    {friend.is_guest && friend.linked_user_id && (
+                                        <span className="text-xs px-1.5 py-0.5 bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400 rounded font-medium">Joined!</span>
+                                    )}
+                                </div>
                             </div>
                         </div>
                         <div className="flex items-center space-x-3">
@@ -180,8 +196,12 @@ const FriendsList: React.FC = () => {
             {showSettledFriends && (
                 <div className="bg-white dark:bg-slate-800 rounded-xl shadow-sm border mt-4">
                     {settledFriends.map(friend => (
-                        <div key={friend.friend_id} className="p-4 opacity-60 text-left">
-                            {friend.friend_name} - Settled up
+                        <div key={friend.friend_id} className="p-4 opacity-60 text-left flex items-center space-x-2 cursor-pointer hover:opacity-80" onClick={() => { setSelectedFriendId(friend.friend_id); setSelectedFriendProfile(allFriends.find(f => f.id === friend.friend_id)); }}>
+                            <span className="text-slate-700 dark:text-slate-300">{friend.friend_name}</span>
+                            {friend.is_guest && !friend.linked_user_id && (
+                                <span className="text-xs px-1.5 py-0.5 bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 rounded font-medium">Guest</span>
+                            )}
+                            <span className="text-slate-500 text-sm">- Settled up</span>
                         </div>
                     ))}
                 </div>

@@ -1,16 +1,36 @@
 import { supabase } from '../lib/supabase';
-import { RealtimeChannel } from '@supabase/supabase-js';
+import { RealtimeChannel, RealtimePostgresChangesPayload } from '@supabase/supabase-js';
 
-type ChangeCallback = () => void;
+export type RealtimeEvent = 'INSERT' | 'UPDATE' | 'DELETE';
 
-// Debounce helper to batch multiple rapid changes into a single callback
-function debounce(fn: ChangeCallback, ms: number): ChangeCallback {
+export interface TransactionPayload {
+  event: RealtimeEvent;
+  new: Record<string, any> | null;
+  old: Record<string, any> | null;
+}
+
+export interface DebtPayload {
+  event: RealtimeEvent;
+  new: Record<string, any> | null;
+  old: Record<string, any> | null;
+}
+
+export type TransactionChangeCallback = (payload: TransactionPayload) => void;
+export type DebtChangeCallback = (payload: DebtPayload) => void;
+type SimpleCallback = () => void;
+
+function debounceWithPayload<T>(
+  fn: (payload: T) => void,
+  ms: number
+): (payload: T) => void {
   let timer: ReturnType<typeof setTimeout> | null = null;
-  return () => {
+  let lastPayload: T;
+  return (payload: T) => {
+    lastPayload = payload;
     if (timer) clearTimeout(timer);
     timer = setTimeout(() => {
       timer = null;
-      fn();
+      fn(lastPayload);
     }, ms);
   };
 }
@@ -21,29 +41,27 @@ class SubscriptionService {
   private retryCount: Map<string, number> = new Map();
   private static MAX_RETRIES = 5;
 
-  /**
-   * Subscribe to transaction changes for a given user.
-   * The callback is debounced by 500ms to batch rapid changes.
-   */
-  subscribeToTransactions(userId: string, onChange: ChangeCallback): () => void {
+  subscribeToTransactions(userId: string, onChange: TransactionChangeCallback): () => void {
     const key = `transactions:${userId}`;
     this.unsubscribe(key);
 
-    const debouncedOnChange = debounce(() => {
-      console.log('[Realtime] Transaction change detected, refreshing...');
-      onChange();
-    }, 500);
+    const debouncedOnChange = debounceWithPayload((payload: TransactionPayload) => {
+      console.log(`[Realtime] Transaction ${payload.event} detected`);
+      onChange(payload);
+    }, 300);
 
     const channel = supabase
       .channel(key)
       .on(
         'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'transactions',
-        },
-        () => debouncedOnChange()
+        { event: '*', schema: 'public', table: 'transactions' },
+        (raw: RealtimePostgresChangesPayload<Record<string, any>>) => {
+          debouncedOnChange({
+            event: raw.eventType as RealtimeEvent,
+            new: raw.new && Object.keys(raw.new).length > 0 ? raw.new : null,
+            old: raw.old && Object.keys(raw.old).length > 0 ? raw.old : null,
+          });
+        }
       )
       .subscribe((status) => {
         console.log(`[Realtime] Transactions subscription: ${status}`);
@@ -58,28 +76,27 @@ class SubscriptionService {
     return () => this.unsubscribe(key);
   }
 
-  /**
-   * Subscribe to debts table changes for a given user.
-   */
-  subscribeToDebts(userId: string, onChange: ChangeCallback): () => void {
+  subscribeToDebts(userId: string, onChange: DebtChangeCallback): () => void {
     const key = `debts:${userId}`;
     this.unsubscribe(key);
 
-    const debouncedOnChange = debounce(() => {
-      console.log('[Realtime] Debts change detected, refreshing balances...');
-      onChange();
-    }, 500);
+    const debouncedOnChange = debounceWithPayload((payload: DebtPayload) => {
+      console.log(`[Realtime] Debt ${payload.event} detected`);
+      onChange(payload);
+    }, 300);
 
     const channel = supabase
       .channel(key)
       .on(
         'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'debts',
-        },
-        () => debouncedOnChange()
+        { event: '*', schema: 'public', table: 'debts' },
+        (raw: RealtimePostgresChangesPayload<Record<string, any>>) => {
+          debouncedOnChange({
+            event: raw.eventType as RealtimeEvent,
+            new: raw.new && Object.keys(raw.new).length > 0 ? raw.new : null,
+            old: raw.old && Object.keys(raw.old).length > 0 ? raw.old : null,
+          });
+        }
       )
       .subscribe((status) => {
         console.log(`[Realtime] Debts subscription: ${status}`);
@@ -94,40 +111,6 @@ class SubscriptionService {
     return () => this.unsubscribe(key);
   }
 
-  /**
-   * Subscribe to user_profiles changes (for display name updates, etc.)
-   */
-  subscribeToProfiles(onChange: ChangeCallback): () => void {
-    const key = 'profiles';
-    this.unsubscribe(key);
-
-    const debouncedOnChange = debounce(() => {
-      console.log('[Realtime] Profile change detected, refreshing...');
-      onChange();
-    }, 500);
-
-    const channel = supabase
-      .channel(key)
-      .on(
-        'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'user_profiles',
-        },
-        () => debouncedOnChange()
-      )
-      .subscribe((status) => {
-        console.log(`[Realtime] Profiles subscription: ${status}`);
-      });
-
-    this.channels.set(key, channel);
-    return () => this.unsubscribe(key);
-  }
-
-  /**
-   * Unsubscribe from a specific channel
-   */
   private unsubscribe(key: string) {
     const channel = this.channels.get(key);
     if (channel) {
@@ -141,9 +124,6 @@ class SubscriptionService {
     }
   }
 
-  /**
-   * Unsubscribe from all channels (cleanup)
-   */
   unsubscribeAll() {
     for (const key of this.channels.keys()) {
       this.unsubscribe(key);
@@ -151,13 +131,10 @@ class SubscriptionService {
     this.retryCount.clear();
   }
 
-  /**
-   * Retry logic with exponential backoff
-   */
   private handleRetry(
     key: string,
     userId: string,
-    onChange: ChangeCallback,
+    onChange: TransactionChangeCallback | DebtChangeCallback,
     table: 'transactions' | 'debts'
   ) {
     const count = (this.retryCount.get(key) || 0) + 1;
@@ -174,9 +151,9 @@ class SubscriptionService {
     const timer = setTimeout(() => {
       this.retryTimers.delete(key);
       if (table === 'transactions') {
-        this.subscribeToTransactions(userId, onChange);
+        this.subscribeToTransactions(userId, onChange as TransactionChangeCallback);
       } else {
-        this.subscribeToDebts(userId, onChange);
+        this.subscribeToDebts(userId, onChange as DebtChangeCallback);
       }
     }, delay);
 

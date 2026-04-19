@@ -16,7 +16,7 @@ interface PayerData {
 
 interface MultiPayerModalProps {
   isOpen: boolean;
-  onClose: () => void;
+  onClose: (savedPayers?: PayerData[]) => void;
   onSave: (payers: PayerData[]) => void;
   participants: Participant[];
   totalAmount: number;
@@ -131,7 +131,7 @@ const MultiPayerModal: React.FC<MultiPayerModalProps> = ({
     }
 
     onSave(selectedPayers);
-    onClose();
+    onClose(selectedPayers);
   };
 
   const getTotalPaid = () => {

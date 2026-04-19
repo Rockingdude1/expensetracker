@@ -1,98 +1,67 @@
-import React, { useState, useEffect } from 'react';
-import { ArrowLeft, Calendar, CreditCard, Banknote, Users, DollarSign } from 'lucide-react';
+import React, { useState, useMemo } from 'react';
+import { ArrowLeft, Calendar, Users, DollarSign, Pencil, Check, X as XIcon } from 'lucide-react';
 import { userService } from '../services/userService';
 import { Transaction, UserProfile, FriendBalance } from '../types';
 import SettleUpModal from './SettleUpModal';
-import { supabase } from '../lib/supabase';
 import { useAuth } from '../contexts/AuthContext';
+import { useTransactionData, useTransactionActions } from '../contexts/TransactionSyncContext';
 
 interface FriendDetailViewProps {
   friendId: string;
+  friendProfile?: UserProfile; // passed from FriendsList for guests with no transactions
   onBack: () => void;
   onBalanceUpdated: () => void;
 }
 
-const FriendDetailView: React.FC<FriendDetailViewProps> = ({ friendId, onBack, onBalanceUpdated }) => {
+const FriendDetailView: React.FC<FriendDetailViewProps> = ({ friendId, friendProfile, onBack, onBalanceUpdated }) => {
   const { user: currentUser } = useAuth();
-  const [friend, setFriend] = useState<UserProfile | null>(null);
-  const [friendBalance, setFriendBalance] = useState<FriendBalance | null>(null);
-  const [transactions, setTransactions] = useState<Transaction[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const { transactions: allTransactions, profilesMap, friendBalances: balancesMap } = useTransactionData();
+  const { refreshBalances } = useTransactionActions();
   const [showSettleUpModal, setShowSettleUpModal] = useState(false);
-  const [profilesMap, setProfilesMap] = useState<Map<string, UserProfile>>(new Map());
 
-  useEffect(() => {
-    loadFriendData();
-  }, [friendId, currentUser]);
+  // Edit guest state
+  const [isEditing, setIsEditing] = useState(false);
+  const [editName, setEditName] = useState('');
+  const [editEmail, setEditEmail] = useState('');
+  const [editLoading, setEditLoading] = useState(false);
+  const [editError, setEditError] = useState('');
+  const [localProfile, setLocalProfile] = useState<UserProfile | null>(null);
 
-  const loadFriendData = async () => {
-    try {
-      if (!currentUser) return;
-      setLoading(true);
-      setError(null);
+  // Prefer locally-updated profile, then context map, then prop fallback (for guests with no txns)
+  const friend = localProfile ?? profilesMap.get(friendId) ?? friendProfile ?? null;
 
-      const { data: friendProfile, error: friendError } = await supabase
-        .from('user_profiles').select('*').eq('id', friendId).single();
+  // Derive balance from context map
+  const rawBalance = balancesMap.get(friendId) ?? 0;
+  const friendBalance: FriendBalance | null = friend
+    ? { friend_id: friendId, friend_name: friend.display_name, friend_email: friend.email, balance: rawBalance, details: [] }
+    : null;
 
-      if (friendError || !friendProfile) throw new Error("Friend profile not found.");
-      setFriend(friendProfile);
-
-      const { data: allTransactions, error: transactionError } = await supabase
-        .from('transactions').select('*');
-
-      if (transactionError) throw new Error("Could not fetch transaction history.");
-
-      const friendTransactions = allTransactions?.filter(tx => {
+  // Filter shared/settlement transactions involving this friend from context — no DB call
+  const transactions = useMemo(() => {
+    if (!currentUser) return [];
+    return allTransactions
+      .filter(tx => {
         if (tx.deleted_at) return false;
-
-        // Settlement transactions: check description (old format) and split_details (new format)
         if (tx.description?.startsWith('SETTLEMENT:')) {
-          const matchesByEmail = tx.description?.includes(friendProfile.email);
-          const matchesByParticipant = tx.split_details?.participants?.some(p => p.user_id === friendId);
-          if (matchesByEmail || matchesByParticipant) return true;
+          return (
+            tx.description.includes(friend?.email ?? '') ||
+            tx.split_details?.participants?.some(p => p.user_id === friendId)
+          );
         }
-
-        // Shared expenses where both users are involved
         if (tx.type === 'shared') {
           const participantIds = tx.split_details?.participants?.map(p => p.user_id) || [];
           const payerIds = tx.payers?.map(p => p.user_id) || [];
-          const bothAreParticipants = participantIds.includes(currentUser.id) && participantIds.includes(friendId);
-          const eitherPaid = payerIds.includes(currentUser.id) || payerIds.includes(friendId);
-          return bothAreParticipants && eitherPaid;
+          return (
+            participantIds.includes(currentUser.id) &&
+            participantIds.includes(friendId) &&
+            (payerIds.includes(currentUser.id) || payerIds.includes(friendId))
+          );
         }
-
         return false;
-      }) || [];
-
-      friendTransactions.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-      setTransactions(friendTransactions);
-
-      // Build profilesMap
-      const userIds = new Set<string>();
-      friendTransactions.forEach(tx => {
-        tx.payers?.forEach(p => userIds.add(p.user_id));
-        tx.split_details?.participants?.forEach(p => userIds.add(p.user_id));
-      });
-      userIds.add(currentUser.id);
-      userIds.add(friendId);
-
-      const profiles = await userService.getUsersByIds(Array.from(userIds));
-      const newProfilesMap = new Map<string, UserProfile>();
-      profiles.forEach(p => newProfilesMap.set(p.id, p));
-      setProfilesMap(newProfilesMap);
-
-      // Get balance from debts table
-      const balances = await userService.getFriendBalances();
-      const currentFriendBalance = balances.find(b => b.friend_id === friendId);
-      setFriendBalance(currentFriendBalance || null);
-
-    } catch (err: any) {
-      setError(err.message || 'Failed to load friend data');
-    } finally {
-      setLoading(false);
-    }
-  };
+      })
+      .slice()
+      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  }, [allTransactions, friendId, currentUser, friend?.email]);
 
   const formatCurrency = (amount: number) => {
     return new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR' }).format(amount);
@@ -186,8 +155,43 @@ const FriendDetailView: React.FC<FriendDetailViewProps> = ({ friendId, onBack, o
     return name ? colors[name.charCodeAt(0) % colors.length] : colors[0];
   };
 
-  if (loading) return <div className="text-center p-8">Loading...</div>;
-  if (error || !friend) return <div className="text-center p-8 text-red-500">Error: {error} <button onClick={onBack} className="ml-2 text-blue-500 underline">Back</button></div>;
+  const startEditing = () => {
+    if (!friend) return;
+    setEditName(friend.display_name || '');
+    setEditEmail(friend.email || '');
+    setEditError('');
+    setIsEditing(true);
+  };
+
+  const cancelEditing = () => {
+    setIsEditing(false);
+    setEditError('');
+  };
+
+  const saveEdit = async () => {
+    if (!friend || !editName.trim()) { setEditError('Name is required'); return; }
+    setEditLoading(true);
+    setEditError('');
+    try {
+      const { error } = await (await import('../lib/supabase')).supabase
+        .from('user_profiles')
+        .update({ display_name: editName.trim(), email: editEmail.trim() || '' })
+        .eq('id', friend.id)
+        .eq('is_guest', true);
+
+      if (error) { setEditError('Failed to save changes'); return; }
+
+      setLocalProfile({ ...friend, display_name: editName.trim(), email: editEmail.trim() || '' });
+      setIsEditing(false);
+      onBalanceUpdated(); // refresh FriendsList
+    } catch {
+      setEditError('Failed to save changes');
+    } finally {
+      setEditLoading(false);
+    }
+  };
+
+  if (!friend) return <div className="text-center p-8 text-slate-500">Friend profile not found. <button onClick={onBack} className="ml-2 text-blue-500 underline">Back</button></div>;
 
   return (
     <div className="space-y-4">
@@ -202,25 +206,84 @@ const FriendDetailView: React.FC<FriendDetailViewProps> = ({ friendId, onBack, o
       {/* Friend Profile Header */}
       <div className="p-4 border-b border-slate-200 dark:border-slate-700">
         <div className="flex items-center justify-between">
-          <div className="flex items-center space-x-4">
-            <div className={`w-12 h-12 rounded-full ${getAvatarColor(friend.display_name || friend.email)} flex items-center justify-center text-white font-semibold text-xl`}>
+          <div className="flex items-center space-x-4 flex-1">
+            <div className={`w-12 h-12 rounded-full ${getAvatarColor(friend.display_name || friend.email)} flex items-center justify-center text-white font-semibold text-xl flex-shrink-0`}>
               {getInitials(friend.display_name || friend.email)}
             </div>
-            <div>
-              <h1 className="text-lg font-bold text-slate-900 dark:text-white">{friend.display_name}</h1>
-              <p className="text-sm text-slate-500">{friend.email}</p>
-              {friendBalance && (
-                <p className={`text-sm mt-1 font-semibold ${friendBalance.balance >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
-                  {friendBalance.balance >= 0 ? 'Owes you' : 'You owe'} {formatCurrency(Math.abs(friendBalance.balance))}
-                </p>
+            <div className="flex-1 min-w-0">
+              {isEditing ? (
+                <div className="space-y-2">
+                  <input
+                    type="text"
+                    value={editName}
+                    onChange={e => setEditName(e.target.value)}
+                    placeholder="Name"
+                    className="w-full px-3 py-1.5 text-sm border border-slate-300 dark:border-slate-600 rounded-lg bg-white dark:bg-slate-700 text-slate-900 dark:text-white focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
+                  />
+                  <input
+                    type="email"
+                    value={editEmail}
+                    onChange={e => setEditEmail(e.target.value)}
+                    placeholder="Email (optional — for auto-linking when they join)"
+                    className="w-full px-3 py-1.5 text-sm border border-slate-300 dark:border-slate-600 rounded-lg bg-white dark:bg-slate-700 text-slate-900 dark:text-white focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
+                  />
+                  {editError && <p className="text-xs text-red-500">{editError}</p>}
+                  <div className="flex space-x-2">
+                    <button
+                      onClick={saveEdit}
+                      disabled={editLoading}
+                      className="flex items-center space-x-1 px-3 py-1.5 bg-emerald-500 hover:bg-emerald-600 disabled:bg-slate-300 text-white rounded-lg text-sm font-medium"
+                    >
+                      <Check className="h-4 w-4" />
+                      <span>{editLoading ? 'Saving…' : 'Save'}</span>
+                    </button>
+                    <button
+                      onClick={cancelEditing}
+                      disabled={editLoading}
+                      className="flex items-center space-x-1 px-3 py-1.5 border border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-300 rounded-lg text-sm font-medium hover:bg-slate-50 dark:hover:bg-slate-700"
+                    >
+                      <XIcon className="h-4 w-4" />
+                      <span>Cancel</span>
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <div className="flex items-center space-x-2">
+                    <h1 className="text-lg font-bold text-slate-900 dark:text-white">{friend.display_name}</h1>
+                    {friend.is_guest && !friend.linked_user_id && (
+                      <span className="text-xs px-1.5 py-0.5 bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 rounded font-medium">Guest</span>
+                    )}
+                    {friend.is_guest && friend.linked_user_id && (
+                      <span className="text-xs px-1.5 py-0.5 bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400 rounded font-medium">Joined!</span>
+                    )}
+                  </div>
+                  <p className="text-sm text-slate-500">{friend.email || (friend.is_guest ? 'No email added' : '')}</p>
+                  {friendBalance && (
+                    <p className={`text-sm mt-1 font-semibold ${friendBalance.balance >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+                      {friendBalance.balance >= 0 ? 'Owes you' : 'You owe'} {formatCurrency(Math.abs(friendBalance.balance))}
+                    </p>
+                  )}
+                </>
               )}
             </div>
           </div>
-          {friendBalance && friendBalance.balance !== 0 && (
-            <button onClick={() => setShowSettleUpModal(true)} className="bg-emerald-500 hover:bg-emerald-600 text-white px-4 py-2 text-sm rounded-lg font-medium">
-              Settle up
-            </button>
-          )}
+          <div className="flex items-center space-x-2 flex-shrink-0 ml-3">
+            {friend.is_guest && !isEditing && (
+              <button
+                onClick={startEditing}
+                className="p-2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-lg transition-colors"
+                title="Edit guest profile"
+              >
+                <Pencil className="h-4 w-4" />
+              </button>
+            )}
+            {friendBalance && friendBalance.balance !== 0 && !isEditing && (
+              <button onClick={() => setShowSettleUpModal(true)} className="bg-emerald-500 hover:bg-emerald-600 text-white px-4 py-2 text-sm rounded-lg font-medium">
+                Settle up
+              </button>
+            )}
+          </div>
         </div>
       </div>
 
@@ -273,7 +336,7 @@ const FriendDetailView: React.FC<FriendDetailViewProps> = ({ friendId, onBack, o
           onSettled={() => {
             setShowSettleUpModal(false);
             onBalanceUpdated();
-            loadFriendData();
+            refreshBalances();
           }}
         />
       )}

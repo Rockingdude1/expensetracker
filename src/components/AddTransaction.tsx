@@ -3,6 +3,7 @@ import { X, Plus, Minus, Save, CreditCard, Banknote, Users, Check, CreditCard as
 import { TransactionType, PaymentMode, Category } from '../types';
 import { UserProfile } from '../types';
 import { supabase } from '../lib/supabase';
+import { userService } from '../services/userService';
 import DatePicker from 'react-datepicker';
 import 'react-datepicker/dist/react-datepicker.css';
 import MultiPayerModal from './MultiPayerModal';
@@ -61,14 +62,12 @@ const AddTransaction: React.FC<AddTransactionProps> = ({ onSubmit, onCancel }) =
       try {
         const { data: { user } } = await supabase.auth.getUser();
         if (!user) return;
-        const { data: userProfile } = await supabase.from('user_profiles').select('*').eq('id', user.id).single();
+        const [userProfile, friendsList] = await Promise.all([
+          supabase.from('user_profiles').select('*').eq('id', user.id).single().then(r => r.data),
+          userService.getFriends(),
+        ]);
         setCurrentUser(userProfile);
-        const { data: connections } = await supabase.from('user_connections').select('user_id_1, user_id_2').or(`user_id_1.eq.${user.id},user_id_2.eq.${user.id}`).eq('status', 'accepted');
-        if (!connections || connections.length === 0) { setFriends([]); return; }
-        const friendIds = connections.map(conn => conn.user_id_1 === user.id ? conn.user_id_2 : conn.user_id_1);
-        const uniqueFriendIds = [...new Set(friendIds)];
-        const { data: friendsList } = await supabase.from('user_profiles').select('*').in('id', uniqueFriendIds);
-        setFriends(friendsList || []);
+        setFriends(friendsList);
       } catch (error) { console.error('Error loading user and friends:', error); }
     };
     loadUserAndFriends();
@@ -96,9 +95,13 @@ const handleSubmit = (e: React.FormEvent) => {
     }
 
     const totalAmount = parseFloat(amount);
-    if (isNaN(totalAmount) || totalAmount <= 0) {
-        alert("Please enter a valid amount.");
-        return;
+    if (!isFinite(totalAmount) || totalAmount <= 0) {
+      alert("Please enter a valid amount.");
+      return;
+    }
+    if (totalAmount > 10_000_000) {
+      alert("Amount cannot exceed ₹1,00,00,000.");
+      return;
     }
 
     const baseTransaction = {
@@ -431,9 +434,9 @@ const handleSubmit = (e: React.FormEvent) => {
       {currentUser && (
         <MultiPayerModal
           isOpen={isMultiPayerModalOpen}
-          onClose={() => {
+          onClose={(savedPayers) => {
             setIsMultiPayerModalOpen(false);
-            if (multiplePayers.length === 0) {
+            if (!savedPayers && multiplePayers.length === 0) {
               setSelectedPayer('you');
             }
           }}
