@@ -14,7 +14,9 @@
         https://*.supabase.co
         https://www.google-analytics.com
         https://analytics.google.com
-        https://stats.g.doubleclick.net;
+        https://stats.g.doubleclick.net
+        https://region1.analytics.google.com
+        https://*.google-analytics.com;
       worker-src 'self' blob:;
       manifest-src 'self';
       frame-ancestors 'none';
