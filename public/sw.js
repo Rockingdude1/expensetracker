@@ -9,29 +9,35 @@ self.addEventListener('activate', (event) => {
 });
 
 self.addEventListener('push', (event) => {
-  if (!event.data) return;
+  let title = 'Spendify';
+  let body = 'You have a new update. Tap to open.';
+  let url = '/';
+  let tag = 'expense-tracker';
 
-  let payload;
-  try {
-    payload = event.data.json();
-  } catch {
-    payload = { title: 'Expense Tracker', body: event.data.text() };
+  if (event.data) {
+    try {
+      const payload = event.data.json();
+      title = payload.title || title;
+      body = payload.body || body;
+      url = payload.url || url;
+      tag = payload.tag || tag;
+    } catch {
+      body = event.data.text() || body;
+    }
   }
 
-  const { title, body, icon, badge, url, tag } = payload;
-
   const options = {
-    body: body || '',
-    icon: icon || '/icons/icon-192.png',
-    badge: badge || '/icons/icon-192.png',
-    tag: tag || 'expense-tracker',
+    body,
+    icon: '/icons/icon-192.png',
+    badge: '/icons/icon-192.png',
+    tag,
     renotify: true,
     requireInteraction: false,
-    data: { url: url || '/' },
+    data: { url },
     vibrate: [200, 100, 200],
   };
 
-  event.waitUntil(self.registration.showNotification(title || 'Expense Tracker', options));
+  event.waitUntil(self.registration.showNotification(title, options));
 });
 
 self.addEventListener('notificationclick', (event) => {
@@ -41,14 +47,12 @@ self.addEventListener('notificationclick', (event) => {
 
   event.waitUntil(
     self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
-      // Focus existing tab if open
       for (const client of clientList) {
         if (client.url.includes(self.location.origin) && 'focus' in client) {
           client.navigate(targetUrl);
           return client.focus();
         }
       }
-      // Otherwise open new tab
       if (self.clients.openWindow) {
         return self.clients.openWindow(targetUrl);
       }
