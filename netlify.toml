@@ -1,0 +1,30 @@
+[[headers]]
+  for = "/*"
+  [headers.values]
+    # Content Security Policy
+    Content-Security-Policy = """
+      default-src 'self';
+      script-src 'self' 'wasm-unsafe-eval' https://www.googletagmanager.com https://www.google-analytics.com;
+      style-src 'self' 'unsafe-inline';
+      img-src 'self' data: blob: https://www.google-analytics.com https://www.googletagmanager.com;
+      font-src 'self' data:;
+      connect-src 'self'
+        https://mkyyhxmdtohftqqspptg.supabase.co
+        wss://mkyyhxmdtohftqqspptg.supabase.co
+        https://*.supabase.co
+        https://www.google-analytics.com
+        https://analytics.google.com
+        https://stats.g.doubleclick.net;
+      worker-src 'self' blob:;
+      manifest-src 'self';
+      frame-ancestors 'none';
+      base-uri 'self';
+      form-action 'self';
+    """
+
+    # Additional security headers
+    X-Frame-Options = "DENY"
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    Permissions-Policy = "camera=(), microphone=(), geolocation=(), payment=()"
+    X-XSS-Protection = "1; mode=block"
