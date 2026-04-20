@@ -15,32 +15,39 @@ function readTokenFromIDB() {
   return new Promise((resolve) => {
     try {
       const req = indexedDB.open(IDB_DB_NAME);
-      req.onerror = () => resolve(null);
+      req.onerror = (e) => { console.log('[SW] IDB open error:', e); resolve(null); };
       req.onsuccess = (e) => {
         const db = e.target.result;
-        if (!db.objectStoreNames.contains(IDB_STORE_NAME)) { resolve(null); return; }
+        console.log('[SW] IDB opened, stores:', Array.from(db.objectStoreNames));
+        if (!db.objectStoreNames.contains(IDB_STORE_NAME)) {
+          console.log('[SW] IDB store not found:', IDB_STORE_NAME);
+          resolve(null); return;
+        }
         const tx = db.transaction(IDB_STORE_NAME, 'readonly');
         const store = tx.objectStore(IDB_STORE_NAME);
-        // Supabase stores session under a key like "sb-<ref>-auth-token"
         const keyReq = store.getAllKeys();
         keyReq.onsuccess = () => {
           const keys = keyReq.result;
+          console.log('[SW] IDB keys:', keys);
           const authKey = keys.find((k) => typeof k === 'string' && k.includes('auth-token'));
+          console.log('[SW] auth key found:', authKey);
           if (!authKey) { resolve(null); return; }
           const getReq = store.get(authKey);
           getReq.onsuccess = () => {
             try {
               const val = getReq.result;
-              // Value may be a string (JSON) or already an object
+              console.log('[SW] IDB raw value type:', typeof val, '| keys:', val ? Object.keys(val) : null);
               const parsed = typeof val === 'string' ? JSON.parse(val) : val;
-              resolve(parsed?.access_token ?? parsed?.session?.access_token ?? null);
-            } catch { resolve(null); }
+              const token = parsed?.access_token ?? parsed?.session?.access_token ?? null;
+              console.log('[SW] token found:', token ? 'YES (length ' + token.length + ')' : 'NO');
+              resolve(token);
+            } catch (err) { console.log('[SW] IDB parse error:', err); resolve(null); }
           };
-          getReq.onerror = () => resolve(null);
+          getReq.onerror = (e) => { console.log('[SW] IDB get error:', e); resolve(null); };
         };
-        keyReq.onerror = () => resolve(null);
+        keyReq.onerror = (e) => { console.log('[SW] IDB getAllKeys error:', e); resolve(null); };
       };
-    } catch { resolve(null); }
+    } catch (err) { console.log('[SW] IDB exception:', err); resolve(null); }
   });
 }
 
