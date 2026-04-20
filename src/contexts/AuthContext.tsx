@@ -14,6 +14,22 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+// Write the access token to IndexedDB so the service worker can read it
+// (SWs have no access to localStorage where Supabase stores the session)
+function saveTokenForSW(token: string | null) {
+  try {
+    const req = indexedDB.open('spendify-sw', 1);
+    req.onupgradeneeded = (e) => {
+      (e.target as IDBOpenDBRequest).result.createObjectStore('auth');
+    };
+    req.onsuccess = (e) => {
+      const db = (e.target as IDBOpenDBRequest).result;
+      const tx = db.transaction('auth', 'readwrite');
+      tx.objectStore('auth').put(token, 'access_token');
+    };
+  } catch { /* non-critical */ }
+}
+
 // Read the cached session from localStorage synchronously so the first render
 // already knows if the user is logged in — no spinner, no waiting for a network call.
 function getLocalSession(): { user: User | null; session: Session | null } {
@@ -45,6 +61,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setSession(session);
       setUser(session?.user ?? null);
       setLoading(false);
+      saveTokenForSW(session?.access_token ?? null);
     });
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
@@ -52,6 +69,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setSession(session);
         setUser(session?.user ?? null);
         setLoading(false);
+        saveTokenForSW(session?.access_token ?? null);
       }
     );
 

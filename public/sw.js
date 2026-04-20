@@ -3,9 +3,8 @@
 const SUPABASE_URL = 'https://mkyyhxmdtohftqqspptg.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1reXloeG1kdG9oZnRxcXNwcHRnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTQzNzAzNTgsImV4cCI6MjA2OTk0NjM1OH0.SWQV-1q5f_rhXAjrGZ65OPEVZvNf5YiwwvjDisVglsY';
 
-// Supabase stores the session in IndexedDB under this key
-const IDB_DB_NAME = 'supabase';
-const IDB_STORE_NAME = 'supabase';
+const IDB_DB_NAME = 'spendify-sw';
+const IDB_STORE_NAME = 'auth';
 
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));
@@ -14,40 +13,17 @@ self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim(
 function readTokenFromIDB() {
   return new Promise((resolve) => {
     try {
-      const req = indexedDB.open(IDB_DB_NAME);
-      req.onerror = (e) => { console.log('[SW] IDB open error:', e); resolve(null); };
+      const req = indexedDB.open(IDB_DB_NAME, 1);
+      req.onerror = () => resolve(null);
       req.onsuccess = (e) => {
         const db = e.target.result;
-        console.log('[SW] IDB opened, stores:', Array.from(db.objectStoreNames));
-        if (!db.objectStoreNames.contains(IDB_STORE_NAME)) {
-          console.log('[SW] IDB store not found:', IDB_STORE_NAME);
-          resolve(null); return;
-        }
+        if (!db.objectStoreNames.contains(IDB_STORE_NAME)) { resolve(null); return; }
         const tx = db.transaction(IDB_STORE_NAME, 'readonly');
-        const store = tx.objectStore(IDB_STORE_NAME);
-        const keyReq = store.getAllKeys();
-        keyReq.onsuccess = () => {
-          const keys = keyReq.result;
-          console.log('[SW] IDB keys:', keys);
-          const authKey = keys.find((k) => typeof k === 'string' && k.includes('auth-token'));
-          console.log('[SW] auth key found:', authKey);
-          if (!authKey) { resolve(null); return; }
-          const getReq = store.get(authKey);
-          getReq.onsuccess = () => {
-            try {
-              const val = getReq.result;
-              console.log('[SW] IDB raw value type:', typeof val, '| keys:', val ? Object.keys(val) : null);
-              const parsed = typeof val === 'string' ? JSON.parse(val) : val;
-              const token = parsed?.access_token ?? parsed?.session?.access_token ?? null;
-              console.log('[SW] token found:', token ? 'YES (length ' + token.length + ')' : 'NO');
-              resolve(token);
-            } catch (err) { console.log('[SW] IDB parse error:', err); resolve(null); }
-          };
-          getReq.onerror = (e) => { console.log('[SW] IDB get error:', e); resolve(null); };
-        };
-        keyReq.onerror = (e) => { console.log('[SW] IDB getAllKeys error:', e); resolve(null); };
+        const getReq = tx.objectStore(IDB_STORE_NAME).get('access_token');
+        getReq.onsuccess = () => resolve(getReq.result ?? null);
+        getReq.onerror = () => resolve(null);
       };
-    } catch (err) { console.log('[SW] IDB exception:', err); resolve(null); }
+    } catch { resolve(null); }
   });
 }
 
