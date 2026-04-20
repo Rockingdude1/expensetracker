@@ -66,22 +66,12 @@ function App() {
     };
     navigator.serviceWorker.addEventListener('controllerchange', handleControllerChange);
 
-    // Listen for token requests from the SW
-    const handleMessage = async (event: MessageEvent) => {
-      if (event.data?.type === 'GET_AUTH_TOKEN') {
-        const { data: { session } } = await supabase.auth.getSession();
-        event.ports[0]?.postMessage({ token: session?.access_token ?? null });
-      }
-    };
-    navigator.serviceWorker.addEventListener('message', handleMessage);
-
     // Update token on auth changes
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       sendTokenToSW(session?.access_token ?? null);
     });
 
     return () => {
-      navigator.serviceWorker.removeEventListener('message', handleMessage);
       navigator.serviceWorker.removeEventListener('controllerchange', handleControllerChange);
       subscription.unsubscribe();
     };
