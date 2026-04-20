@@ -46,17 +46,25 @@ function App() {
   useEffect(() => {
     if (!('serviceWorker' in navigator)) return;
 
-    const sendTokenToSW = async (token: string | null) => {
-      const reg = await navigator.serviceWorker.ready.catch(() => null);
-      if (reg?.active && token) {
-        reg.active.postMessage({ type: 'SET_AUTH_TOKEN', token });
+    const sendTokenToSW = (token: string | null) => {
+      const sw = navigator.serviceWorker.controller;
+      if (sw && token) {
+        sw.postMessage({ type: 'SET_AUTH_TOKEN', token });
       }
     };
 
-    // Send current session token
+    // Send token now if SW is already controlling the page
     supabase.auth.getSession().then(({ data: { session } }) => {
       sendTokenToSW(session?.access_token ?? null);
     });
+
+    // Also send once the SW takes control (first load after install)
+    const handleControllerChange = () => {
+      supabase.auth.getSession().then(({ data: { session } }) => {
+        sendTokenToSW(session?.access_token ?? null);
+      });
+    };
+    navigator.serviceWorker.addEventListener('controllerchange', handleControllerChange);
 
     // Listen for token requests from the SW
     const handleMessage = async (event: MessageEvent) => {
@@ -74,6 +82,7 @@ function App() {
 
     return () => {
       navigator.serviceWorker.removeEventListener('message', handleMessage);
+      navigator.serviceWorker.removeEventListener('controllerchange', handleControllerChange);
       subscription.unsubscribe();
     };
   }, []);
