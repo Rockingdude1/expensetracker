@@ -12,6 +12,7 @@ import { useAuth } from './contexts/AuthContext';
 import { useTransactionSync } from './contexts/TransactionSyncContext';
 import { transactionService } from './services/transactionService';
 import { formatMonthYear, getCurrentMonthYear, getMonthYearFromDate } from './utils/dateUtils';
+import { supabase } from './lib/supabase';
 
 function App() {
   const { theme, toggleTheme } = useTheme();
@@ -40,6 +41,42 @@ function App() {
 
   // Keep ref in sync with state so the effect below can read it without a dep
   useEffect(() => { selectedMonthYearRef.current = selectedMonthYear; }, [selectedMonthYear]);
+
+  // Share auth token with service worker so it can fetch pending notifications
+  useEffect(() => {
+    if (!('serviceWorker' in navigator)) return;
+
+    const sendTokenToSW = async (token: string | null) => {
+      const reg = await navigator.serviceWorker.ready.catch(() => null);
+      if (reg?.active && token) {
+        reg.active.postMessage({ type: 'SET_AUTH_TOKEN', token });
+      }
+    };
+
+    // Send current session token
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      sendTokenToSW(session?.access_token ?? null);
+    });
+
+    // Listen for token requests from the SW
+    const handleMessage = async (event: MessageEvent) => {
+      if (event.data?.type === 'GET_AUTH_TOKEN') {
+        const { data: { session } } = await supabase.auth.getSession();
+        event.ports[0]?.postMessage({ token: session?.access_token ?? null });
+      }
+    };
+    navigator.serviceWorker.addEventListener('message', handleMessage);
+
+    // Update token on auth changes
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      sendTokenToSW(session?.access_token ?? null);
+    });
+
+    return () => {
+      navigator.serviceWorker.removeEventListener('message', handleMessage);
+      subscription.unsubscribe();
+    };
+  }, []);
 
   // Update available months when transactions change
   useEffect(() => {
