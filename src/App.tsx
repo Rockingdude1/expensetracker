@@ -12,7 +12,6 @@ import { useAuth } from './contexts/AuthContext';
 import { useTransactionSync } from './contexts/TransactionSyncContext';
 import { transactionService } from './services/transactionService';
 import { formatMonthYear, getCurrentMonthYear, getMonthYearFromDate } from './utils/dateUtils';
-import { supabase } from './lib/supabase';
 
 function App() {
   const { theme, toggleTheme } = useTheme();
@@ -41,41 +40,6 @@ function App() {
 
   // Keep ref in sync with state so the effect below can read it without a dep
   useEffect(() => { selectedMonthYearRef.current = selectedMonthYear; }, [selectedMonthYear]);
-
-  // Share auth token with service worker so it can fetch pending notifications
-  useEffect(() => {
-    if (!('serviceWorker' in navigator)) return;
-
-    const sendTokenToSW = (token: string | null) => {
-      const sw = navigator.serviceWorker.controller;
-      if (sw && token) {
-        sw.postMessage({ type: 'SET_AUTH_TOKEN', token });
-      }
-    };
-
-    // Send token now if SW is already controlling the page
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      sendTokenToSW(session?.access_token ?? null);
-    });
-
-    // Also send once the SW takes control (first load after install)
-    const handleControllerChange = () => {
-      supabase.auth.getSession().then(({ data: { session } }) => {
-        sendTokenToSW(session?.access_token ?? null);
-      });
-    };
-    navigator.serviceWorker.addEventListener('controllerchange', handleControllerChange);
-
-    // Update token on auth changes
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      sendTokenToSW(session?.access_token ?? null);
-    });
-
-    return () => {
-      navigator.serviceWorker.removeEventListener('controllerchange', handleControllerChange);
-      subscription.unsubscribe();
-    };
-  }, []);
 
   // Update available months when transactions change
   useEffect(() => {

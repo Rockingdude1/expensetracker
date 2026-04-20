@@ -10,13 +10,6 @@ const IDB_STORE_NAME = 'supabase';
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));
 
-// Cache token sent from the app (best-effort, may not arrive before push)
-let cachedToken = null;
-self.addEventListener('message', (event) => {
-  if (event.data?.type === 'SET_AUTH_TOKEN') {
-    cachedToken = event.data.token;
-  }
-});
 
 function readTokenFromIDB() {
   return new Promise((resolve) => {
@@ -52,7 +45,6 @@ function readTokenFromIDB() {
 }
 
 async function getAccessToken() {
-  if (cachedToken) return cachedToken;
   return readTokenFromIDB();
 }
 
@@ -110,14 +102,11 @@ self.addEventListener('notificationclick', (event) => {
   event.notification.close();
   const targetUrl = new URL(event.notification.data?.url || '/', self.location.origin).href;
   event.waitUntil(
-    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
-      // Focus an existing tab on our origin if one exists
+    // Only returns clients controlled by THIS SW — safe to call focus() on
+    self.clients.matchAll({ type: 'window' }).then((clientList) => {
       for (const client of clientList) {
-        if (client.url.startsWith(self.location.origin) && 'focus' in client) {
-          return client.focus();
-        }
+        if ('focus' in client) return client.focus();
       }
-      // No existing tab — open a new one
       return self.clients.openWindow(targetUrl);
     })
   );
